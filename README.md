@@ -242,8 +242,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
 3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
 4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
 ---
 
 ## ⭐ Star History
@@ -251,6 +249,10 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 If you find this script useful, please consider giving it a star!
 
 [![Star History Chart](https://api.star-history.com/svg?repos=hiall-fyi/ha-cleanup&type=Date)](https://star-history.com/#hiall-fyi/ha-cleanup&Date)
+
+---
+
+<div align="center">
 
 ### 💖 Support This Project
 
@@ -260,7 +262,9 @@ If this script saved you from "ghost entity" headaches, consider buying me a cof
 
 **Made with ❤️ by Joe Yiu ([@hiall-fyi](https://github.com/hiall-fyi))**
 
-*Solving real problems for the Home Assistant community*
+</div>
+
+---
 
 **Version**: 1.0.0  
 **Last Updated**: 2026-01-15  
