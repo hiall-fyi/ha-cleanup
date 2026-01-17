@@ -10,9 +10,11 @@
 
 [Features](#-features) • [Quick Start](#-quick-start) • [Usage](#-usage) • [Troubleshooting](#-troubleshooting)
 
-### 🎯 Created by [@hiall-fyi](https://github.com/hiall-fyi)
+### 🎯 Created by Joe Yiu ([@hiall-fyi](https://github.com/hiall-fyi))
 
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/hiallfyi)
+<a href="https://buymeacoffee.com/hiallfyi" target="_blank">
+  <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;">
+</a>
 
 *If this script saves you time, consider buying me a coffee! ☕*
 
@@ -254,11 +256,9 @@ If you find this script useful, please consider giving it a star!
 
 If this script saved you from "ghost entity" headaches, consider buying me a coffee! ☕
 
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/hiallfyi)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/hiallfyi)
 
----
-
-**Made with ❤️ by [@hiall-fyi](https://github.com/hiall-fyi)**
+**Made with ❤️ by Joe Yiu ([@hiall-fyi](https://github.com/hiall-fyi))**
 
 *Solving real problems for the Home Assistant community*
 
