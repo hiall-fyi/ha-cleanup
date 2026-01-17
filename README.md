@@ -1,5 +1,7 @@
 # 🧹 Home Assistant Cleanup
 
+<div align="center">
+
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1+-41BDF5?style=for-the-badge&logo=home-assistant&logoColor=white)](https://www.home-assistant.io/)
 [![Python](https://img.shields.io/badge/Python-3.8+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
@@ -10,6 +12,8 @@
 
 [Features](#-features) • [Quick Start](#-quick-start) • [Usage](#-usage) • [Troubleshooting](#-troubleshooting)
 
+---
+
 ### 🎯 Created by Joe Yiu ([@hiall-fyi](https://github.com/hiall-fyi))
 
 <a href="https://buymeacoffee.com/hiallfyi" target="_blank">
@@ -17,6 +21,8 @@
 </a>
 
 *If this script saves you time, consider buying me a coffee! ☕*
+
+</div>
 
 ---
 
@@ -85,9 +91,9 @@ python3 ha-cleanup.py --dry-run
 **Example Output:**
 
 ```
-[2026-01-15 20:00:00] ==================================================
+[2026-01-15 20:00:00] ====================================================
 [2026-01-15 20:00:00] Home Assistant Cleanup (DRY RUN)
-[2026-01-15 20:00:00] ==================================================
+[2026-01-15 20:00:00] ====================================================
 [2026-01-15 20:00:00] Config path: /homeassistant
 [2026-01-15 20:00:00] Database size: 256.3 MB
 
@@ -100,11 +106,11 @@ python3 ha-cleanup.py --dry-run
 [2026-01-15 20:00:00] Would clean 8 deleted devices
 [2026-01-15 20:00:00] Would purge 125000 states, 89000 events older than 14 days
 
-[2026-01-15 20:00:00] ==================================================
+[2026-01-15 20:00:00] ====================================================
 [2026-01-15 20:00:00] Summary:
 [2026-01-15 20:00:00]   Orphaned entities: 12
 [2026-01-15 20:00:00]   Deleted registry items: 53
-[2026-01-15 20:00:00] ==================================================
+[2026-01-15 20:00:00] ====================================================
 [2026-01-15 20:00:00] Done!
 ```
 
@@ -242,6 +248,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
 3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
 4. Push to the branch (`git push origin feature/AmazingFeature`)
+
 ---
 
 ## ⭐ Star History
@@ -269,3 +276,16 @@ If this script saved you from "ghost entity" headaches, consider buying me a cof
 **Version**: 1.0.0  
 **Last Updated**: 2026-01-15  
 **Tested On**: Home Assistant 2024.x (HAOS, Docker, Core)
+
+---
+
+## ⚖️ Disclaimer
+
+This project is not affiliated with, endorsed by, or connected to Nabu Casa, Inc. or the Home Assistant project.
+
+- **Home Assistant** is a trademark of Nabu Casa, Inc.
+- All product names, logos, and brands are property of their respective owners.
+
+This script is provided "as is" without warranty of any kind. Use at your own risk. The authors are not responsible for any damages or issues arising from the use of this software, including but not limited to data loss, registry corruption, or system instability.
+
+This is an independent, community-developed project created to help Home Assistant users clean up orphaned entities and maintain their systems.
