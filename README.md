@@ -1,52 +1,51 @@
-# 🧹 Home Assistant Cleanup
+# Home Assistant Cleanup
 
 <div align="center">
 
-[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1+-41BDF5?style=for-the-badge&logo=home-assistant&logoColor=white)](https://www.home-assistant.io/)
-[![Python](https://img.shields.io/badge/Python-3.8+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
+<!-- Platform Badges -->
+![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1+-blue?style=for-the-badge&logo=home-assistant) ![Python](https://img.shields.io/badge/Python-3.8+-3776AB?style=for-the-badge&logo=python&logoColor=white)
+
+<!-- Status Badges -->
+![Version](https://img.shields.io/badge/Version-1.0.1-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
+
+<!-- Community Badges -->
+![GitHub stars](https://img.shields.io/github/stars/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub forks](https://img.shields.io/github/forks/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub issues](https://img.shields.io/github/issues/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub last commit](https://img.shields.io/github/last-commit/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github)
 
 **Automated cleanup script for Home Assistant - Remove orphaned entities, clean registries, purge old database records.**
 
-> **🔥 Solves the common "ghost entities" problem** - entities that persist after removing integrations or devices
-
-[Features](#-features) • [Quick Start](#-quick-start) • [Usage](#-usage) • [Troubleshooting](#-troubleshooting)
-
----
-
-### 🎯 Created by Joe Yiu ([@hiall-fyi](https://github.com/hiall-fyi))
-
-<a href="https://buymeacoffee.com/hiallfyi" target="_blank">
-  <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;">
-</a>
-
-*If this script saves you time, consider buying me a coffee! ☕*
+[Features](#features) • [Quick Start](#quick-start) • [Usage](#usage) • [Troubleshooting](#troubleshooting)
 
 </div>
 
 ---
 
-## 🎯 Features
+## Why HA Cleanup?
 
-- 🗑️ **Orphaned entity cleanup** - Removes entities with missing device/config/automation definitions
-- 🧹 **Deleted registry cleanup** - Clears `deleted_entities` and `deleted_devices` lists
-- 💾 **Database purge** - Removes states/events older than 14 days + VACUUM
-- 📦 **Old backup cleanup** - Removes backup files older than 7 days
-- 🛡️ **Auto backup** - Backs up registry files before any modifications
-- 👀 **Dry-run mode** - Preview all changes without modifying anything
+Home Assistant accumulates "ghost entities" over time - entities that persist after removing integrations or devices. These clutter your entity list and can cause confusion.
 
-### 📊 What It Cleans
+**Common issues this solves:**
 
-| Resource | Description | Impact |
-|----------|-------------|--------|
-| **Orphaned Entities** | Entities referencing deleted devices/configs | Cleaner entity list |
-| **Deleted Registry Items** | Soft-deleted entries in registries | Smaller registry files |
-| **Old Database Records** | States/events older than 14 days | Smaller database, faster queries |
-| **Old Backups** | Script-created backups older than 7 days | Disk space savings |
+- Orphaned entities from deleted integrations
+- Deleted devices still appearing in registries
+- Database bloat from old states/events
+- Stale automation references
 
 ---
 
-## 📋 Prerequisites
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| **Orphaned Entity Cleanup** | Removes entities with missing device/config/automation definitions |
+| **Deleted Registry Cleanup** | Clears `deleted_entities` and `deleted_devices` lists |
+| **Database Purge** | Removes states/events older than 14 days + VACUUM |
+| **Old Backup Cleanup** | Removes backup files older than 7 days |
+| **Auto Backup** | Backs up registry files before any modifications |
+| **Dry-Run Mode** | Preview all changes without modifying anything |
+
+---
+
+## Prerequisites
 
 - **Home Assistant**: Any installation type (HAOS, Docker, Core)
 - **Python**: 3.8 or higher
@@ -54,12 +53,11 @@
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Download
 
 ```bash
-# Download to your HA config directory
 wget -O ha-cleanup.py https://raw.githubusercontent.com/hiall-fyi/ha-cleanup/main/ha-cleanup.py
 chmod +x ha-cleanup.py
 ```
@@ -78,7 +76,7 @@ python3 ha-cleanup.py
 
 ---
 
-## 📖 Usage
+## Usage
 
 ### Dry Run Mode (Safe Preview)
 
@@ -91,27 +89,26 @@ python3 ha-cleanup.py --dry-run
 **Example Output:**
 
 ```
-[2026-01-15 20:00:00] ====================================================
+[2026-01-15 20:00:00] ==================================================
 [2026-01-15 20:00:00] Home Assistant Cleanup (DRY RUN)
-[2026-01-15 20:00:00] ====================================================
+[2026-01-15 20:00:00] ==================================================
 [2026-01-15 20:00:00] Config path: /homeassistant
 [2026-01-15 20:00:00] Database size: 256.3 MB
 
 [2026-01-15 20:00:00] Found 12 orphaned entities:
-[2026-01-15 20:00:00]   - automation: automation.old_automation (Old Automation)
 [2026-01-15 20:00:00]   - hue: light.deleted_bulb (Deleted Bulb)
 [2026-01-15 20:00:00]   - mqtt: sensor.orphaned_sensor (Orphaned Sensor)
 ...
 [2026-01-15 20:00:00] Would clean 45 deleted entities
 [2026-01-15 20:00:00] Would clean 8 deleted devices
-[2026-01-15 20:00:00] Would purge 125000 states, 89000 events older than 14 days
+[2026-01-15 20:00:00] Using recorder purge_keep_days from configuration.yaml: 7
+[2026-01-15 20:00:00] Would purge 125000 states, 89000 events older than 7 days
 
-[2026-01-15 20:00:00] ====================================================
+[2026-01-15 20:00:00] ==================================================
 [2026-01-15 20:00:00] Summary:
 [2026-01-15 20:00:00]   Orphaned entities: 12
 [2026-01-15 20:00:00]   Deleted registry items: 53
-[2026-01-15 20:00:00] ====================================================
-[2026-01-15 20:00:00] Done!
+[2026-01-15 20:00:00] ==================================================
 ```
 
 ### Execute Cleanup
@@ -124,18 +121,18 @@ python3 ha-cleanup.py
 
 **What happens:**
 
-1. ✅ Stops Home Assistant
-2. ✅ Backs up registry files
-3. ✅ Removes orphaned entities
-4. ✅ Cleans deleted registry items
-5. ✅ Purges old database records
-6. ✅ Vacuums database
-7. ✅ Removes old backup files
-8. ✅ Starts Home Assistant
+1. Stops Home Assistant
+2. Backs up registry files
+3. Removes orphaned entities
+4. Cleans deleted registry items
+5. Purges old database records
+6. Vacuums database
+7. Removes old backup files
+8. Starts Home Assistant
 
 ---
 
-## 🔧 Config Path Detection
+## Config Path Detection
 
 The script automatically detects your Home Assistant config directory:
 
@@ -147,14 +144,13 @@ The script automatically detects your Home Assistant config directory:
 
 ---
 
-## 🔄 Automation (Optional)
+## Automation (Optional)
 
 ### Cron Job Example
 
 Run cleanup weekly on Sunday at 3 AM:
 
 ```bash
-# Edit crontab
 crontab -e
 
 # Add this line
@@ -173,7 +169,7 @@ shell_command:
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Script Can't Find Config Directory
 
@@ -185,11 +181,6 @@ Error: Could not find Home Assistant config directory
 
 ### Permission Denied
 
-```
-PermissionError: [Errno 13] Permission denied
-```
-
-**Solution**: Run with appropriate permissions:
 ```bash
 sudo python3 ha-cleanup.py
 ```
@@ -205,15 +196,11 @@ If none work, the script will prompt you to stop/start HA manually.
 
 ### Database Locked
 
-```
-sqlite3.OperationalError: database is locked
-```
-
-**Solution**: Ensure Home Assistant is fully stopped before running cleanup.
+Ensure Home Assistant is fully stopped before running cleanup.
 
 ---
 
-## 📊 Safety Features
+## Safety Features
 
 | Feature | Description |
 |---------|-------------|
@@ -224,23 +211,23 @@ sqlite3.OperationalError: database is locked
 
 ---
 
-## 🆘 Support
+## Support
 
 For issues and questions:
 
-1. Check the [Troubleshooting](#-troubleshooting) section
+1. Check the [Troubleshooting](#troubleshooting) section
 2. Run with `--dry-run` first to preview changes
-3. Open an issue on [GitHub](https://github.com/hiall-fyi/ha-cleanup/issues)
+3. [Open an issue on GitHub](https://github.com/hiall-fyi/ha-cleanup/issues)
 
 ---
 
-## 📄 License
+## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
@@ -248,10 +235,11 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
 3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
 4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
 ---
 
-## ⭐ Star History
+## Star History
 
 If you find this script useful, please consider giving it a star!
 
@@ -261,25 +249,25 @@ If you find this script useful, please consider giving it a star!
 
 <div align="center">
 
-### 💖 Support This Project
+### Support This Project
 
-If this script saved you from "ghost entity" headaches, consider buying me a coffee! ☕
+If this script saved you from "ghost entity" headaches, consider supporting the project!
 
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/hiallfyi)
 
-**Made with ❤️ by Joe Yiu ([@hiall-fyi](https://github.com/hiall-fyi))**
+**Made with love by Joe Yiu ([@hiall-fyi](https://github.com/hiall-fyi))**
 
 </div>
 
 ---
 
-**Version**: 1.0.0  
-**Last Updated**: 2026-01-15  
+**Version**: 1.0.1  
+**Last Updated**: 2026-01-25  
 **Tested On**: Home Assistant 2024.x (HAOS, Docker, Core)
 
 ---
 
-## ⚖️ Disclaimer
+## Disclaimer
 
 This project is not affiliated with, endorsed by, or connected to Nabu Casa, Inc. or the Home Assistant project.
 

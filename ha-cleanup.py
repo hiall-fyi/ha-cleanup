@@ -3,6 +3,15 @@
 Home Assistant Cleanup Script
 Removes orphaned entities, cleans registries, purges old database records.
 
+Features:
+  - Detects orphaned entities (missing device/config/automation)
+  - Supports UI-based automations, automations.yaml, and automation/ folder
+  - Auto-detects recorder purge_keep_days from HA config
+  - Cleans deleted_entities and deleted_devices from registries
+  - Purges old states/events and vacuums database
+  - Auto-detects config path (HAOS, Docker, Core)
+  - Supports multiple HA stop/start methods
+
 Usage:
   python3 ha-cleanup.py --dry-run    # Preview changes
   python3 ha-cleanup.py              # Execute cleanup (requires HA restart)
@@ -30,7 +39,50 @@ CONFIG_ENTRIES = CONFIG_PATH / ".storage/core.config_entries"
 DB_PATH = CONFIG_PATH / "home-assistant_v2.db"
 STORAGE_PATH = CONFIG_PATH / ".storage"
 AUTOMATION_PATH = CONFIG_PATH / "automation"
-PURGE_DAYS = 14
+DEFAULT_PURGE_DAYS = 14
+
+
+def get_recorder_purge_days():
+    """Get purge_keep_days from HA recorder config, fallback to default."""
+    # Try configuration.yaml first
+    config_yaml = CONFIG_PATH / "configuration.yaml"
+    if config_yaml.exists():
+        try:
+            in_recorder = False
+            for line in open(config_yaml):
+                stripped = line.strip()
+                # Check if we're entering recorder section
+                if stripped.startswith("recorder:"):
+                    in_recorder = True
+                    continue
+                # Check if we're leaving recorder section (new top-level key)
+                if in_recorder and stripped and not stripped.startswith("#") and not stripped.startswith("-") and not line.startswith(" ") and not line.startswith("\t"):
+                    in_recorder = False
+                # Look for purge_keep_days in recorder section
+                if in_recorder and "purge_keep_days:" in stripped:
+                    value = stripped.split(":", 1)[1].strip()
+                    days = int(value)
+                    log(f"Using recorder purge_keep_days from configuration.yaml: {days}")
+                    return days
+        except (ValueError, IOError):
+            pass
+    
+    # Try .storage/core.config_entries for recorder integration
+    if CONFIG_ENTRIES.exists():
+        try:
+            data = load_json(CONFIG_ENTRIES)
+            for entry in data.get("data", {}).get("entries", []):
+                if entry.get("domain") == "recorder":
+                    options = entry.get("options", {})
+                    if "purge_keep_days" in options:
+                        days = options["purge_keep_days"]
+                        log(f"Using recorder purge_keep_days from config entries: {days}")
+                        return days
+        except (json.JSONDecodeError, KeyError):
+            pass
+    
+    log(f"Using default purge_keep_days: {DEFAULT_PURGE_DAYS}")
+    return DEFAULT_PURGE_DAYS
 
 def log(msg):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
@@ -136,11 +188,13 @@ def cleanup_deleted_items(dry_run=False):
             count += n
     return count
 
-def purge_database(dry_run=False):
+def purge_database(dry_run=False, purge_days=None):
     if not DB_PATH.exists():
         log("✓ No database found, skipping")
         return
-    cutoff_ts = int((datetime.now() - timedelta(days=PURGE_DAYS)).timestamp())
+    if purge_days is None:
+        purge_days = get_recorder_purge_days()
+    cutoff_ts = int((datetime.now() - timedelta(days=purge_days)).timestamp())
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM states WHERE last_updated_ts < ?", (cutoff_ts,))
@@ -149,7 +203,7 @@ def purge_database(dry_run=False):
     events = cur.fetchone()[0]
 
     if states or events:
-        log(f"{'Would purge' if dry_run else 'Purging'} {states} states, {events} events older than {PURGE_DAYS} days")
+        log(f"{'Would purge' if dry_run else 'Purging'} {states} states, {events} events older than {purge_days} days")
         if not dry_run:
             cur.execute("DELETE FROM states WHERE last_updated_ts < ?", (cutoff_ts,))
             cur.execute("DELETE FROM events WHERE time_fired_ts < ?", (cutoff_ts,))
