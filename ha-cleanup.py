@@ -48,28 +48,57 @@ def save_json(path, data):
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)
 
-def get_yaml_automation_ids():
+def get_automation_ids():
+    """Get all automation IDs from both YAML files and UI storage."""
     ids = set()
-    if not AUTOMATION_PATH.exists():
-        return ids
-    for f in AUTOMATION_PATH.glob("*.yaml"):
-        for line in open(f):
-            if line.strip().startswith("- id:"):
+    
+    # Check YAML automations in automation/ folder
+    if AUTOMATION_PATH.exists():
+        for f in AUTOMATION_PATH.glob("*.yaml"):
+            for line in open(f):
+                if line.strip().startswith("- id:") or line.strip().startswith("id:"):
+                    ids.add(line.split(":", 1)[1].strip().strip("'\""))
+    
+    # Check automations.yaml in config root
+    automations_yaml = CONFIG_PATH / "automations.yaml"
+    if automations_yaml.exists():
+        for line in open(automations_yaml):
+            if line.strip().startswith("- id:") or line.strip().startswith("id:"):
                 ids.add(line.split(":", 1)[1].strip().strip("'\""))
+    
+    # Check UI-based automations in .storage
+    ui_automations = STORAGE_PATH / "automations"
+    if ui_automations.exists():
+        try:
+            data = load_json(ui_automations)
+            for item in data.get("data", {}).get("items", []):
+                if item.get("id"):
+                    ids.add(item["id"])
+        except (json.JSONDecodeError, KeyError):
+            pass
+    
     return ids
 
 def find_orphaned_entities():
     entity_data = load_json(ENTITY_REGISTRY)
     devices = {d["id"] for d in load_json(DEVICE_REGISTRY)["data"]["devices"]}
     config_entries = {e["entry_id"] for e in load_json(CONFIG_ENTRIES)["data"]["entries"]}
-    yaml_automations = get_yaml_automation_ids()
+    automation_ids = get_automation_ids()
 
     orphans = []
     for e in entity_data['data']['entities']:
         did, cid = e.get("device_id"), e.get("config_entry_id")
         is_orphan = (did and did not in devices) or (cid and cid not in config_entries)
-        if e.get('platform') == 'automation' and e.get('unique_id') not in yaml_automations:
-            is_orphan = True
+        
+        # Only mark automation as orphan if it has a unique_id AND that id is not found
+        if e.get('platform') == 'automation':
+            unique_id = e.get('unique_id')
+            if unique_id and unique_id not in automation_ids:
+                is_orphan = True
+            else:
+                # Don't mark as orphan if we can't verify (no unique_id or id exists)
+                is_orphan = False
+        
         if is_orphan:
             orphans.append((e['platform'], e['entity_id'], e.get('original_name', '')))
     return orphans
