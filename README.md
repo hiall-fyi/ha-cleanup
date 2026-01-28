@@ -6,12 +6,12 @@
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1+-blue?style=for-the-badge&logo=home-assistant) ![Python](https://img.shields.io/badge/Python-3.8+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 
 <!-- Status Badges -->
-![Version](https://img.shields.io/badge/Version-1.0.1-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.1.0-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
 
 <!-- Community Badges -->
 ![GitHub stars](https://img.shields.io/github/stars/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub forks](https://img.shields.io/github/forks/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub issues](https://img.shields.io/github/issues/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub last commit](https://img.shields.io/github/last-commit/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github)
 
-**Automated cleanup script for Home Assistant - Remove orphaned entities, clean registries, purge old database records.**
+**Interactive cleanup tool for Home Assistant - Remove orphaned entities, fix entity suffixes, clean registries, purge old database records.**
 
 [Features](#features) • [Quick Start](#quick-start) • [Usage](#usage) • [Troubleshooting](#troubleshooting)
 
@@ -26,9 +26,9 @@ Home Assistant accumulates "ghost entities" over time - entities that persist af
 **Common issues this solves:**
 
 - Orphaned entities from deleted integrations
+- Entity names with `_2` suffix after re-adding integrations
 - Deleted devices still appearing in registries
 - Database bloat from old states/events
-- Stale automation references
 
 ---
 
@@ -36,12 +36,14 @@ Home Assistant accumulates "ghost entities" over time - entities that persist af
 
 | Feature | Description |
 |---------|-------------|
+| **Interactive Menu** | Easy-to-use menu for selecting cleanup operations |
 | **Orphaned Entity Cleanup** | Removes entities with missing device/config/automation definitions |
+| **Fix _2 Suffix** | Fixes entity IDs that got `_2` appended after re-adding integrations |
 | **Deleted Registry Cleanup** | Clears `deleted_entities` and `deleted_devices` lists |
-| **Database Purge** | Removes states/events older than 14 days + VACUUM |
-| **Old Backup Cleanup** | Removes backup files older than 7 days |
-| **Auto Backup** | Backs up registry files before any modifications |
+| **Database Purge** | Removes states/events older than your recorder setting + VACUUM |
+| **Auto-Detect Config** | Reads `purge_keep_days` from your HA recorder configuration |
 | **Dry-Run Mode** | Preview all changes without modifying anything |
+| **Auto Backup** | Backs up registry files before any modifications |
 
 ---
 
@@ -62,25 +64,67 @@ wget -O ha-cleanup.py https://raw.githubusercontent.com/hiall-fyi/ha-cleanup/mai
 chmod +x ha-cleanup.py
 ```
 
-### 2. Preview Changes (Dry Run)
-
-```bash
-python3 ha-cleanup.py --dry-run
-```
-
-### 3. Execute Cleanup
+### 2. Run Interactive Menu
 
 ```bash
 python3 ha-cleanup.py
+```
+
+### 3. Or Preview Changes First
+
+```bash
+python3 ha-cleanup.py --dry-run
 ```
 
 ---
 
 ## Usage
 
-### Dry Run Mode (Safe Preview)
+### Interactive Menu
 
-Preview what would be removed without making any changes:
+Run without arguments to get the interactive menu:
+
+```bash
+python3 ha-cleanup.py
+```
+
+```
+==================================================
+  Home Assistant Cleanup Tool
+==================================================
+  Config: /homeassistant
+  Database: 1215.6 MB
+==================================================
+
+  1. Full cleanup (all operations)
+  2. Remove orphaned entities
+  3. Clean deleted registry items
+  4. Purge old database records
+  5. Fix _2 entity suffix
+  6. Clean old backup files
+
+  d. Dry run (preview all)
+  q. Quit
+
+  Select option:
+```
+
+### Menu Options
+
+| Option | Description | Requires HA Restart |
+|--------|-------------|---------------------|
+| **1** | Run all cleanup operations | Yes |
+| **2** | Remove orphaned entities only | Yes |
+| **3** | Clean deleted registry items only | Yes |
+| **4** | Purge old database records only | Yes |
+| **5** | Fix `_2` entity suffix only | Yes |
+| **6** | Clean old backup files (7+ days) | No |
+| **d** | Dry run - preview all changes | No |
+| **q** | Quit | - |
+
+### Dry Run Mode
+
+Preview what would be cleaned without making any changes:
 
 ```bash
 python3 ha-cleanup.py --dry-run
@@ -89,46 +133,51 @@ python3 ha-cleanup.py --dry-run
 **Example Output:**
 
 ```
-[2026-01-15 20:00:00] ==================================================
-[2026-01-15 20:00:00] Home Assistant Cleanup (DRY RUN)
-[2026-01-15 20:00:00] ==================================================
-[2026-01-15 20:00:00] Config path: /homeassistant
-[2026-01-15 20:00:00] Database size: 256.3 MB
+[2026-01-28 14:46:08] ==================================================
+[2026-01-28 14:46:08] Home Assistant Cleanup (DRY RUN)
+[2026-01-28 14:46:08] ==================================================
+[2026-01-28 14:46:08] Config path: /homeassistant
+[2026-01-28 14:46:08] Database size: 1215.6 MB
 
-[2026-01-15 20:00:00] Found 12 orphaned entities:
-[2026-01-15 20:00:00]   - hue: light.deleted_bulb (Deleted Bulb)
-[2026-01-15 20:00:00]   - mqtt: sensor.orphaned_sensor (Orphaned Sensor)
-...
-[2026-01-15 20:00:00] Would clean 45 deleted entities
-[2026-01-15 20:00:00] Would clean 8 deleted devices
-[2026-01-15 20:00:00] Using recorder purge_keep_days from configuration.yaml: 7
-[2026-01-15 20:00:00] Would purge 125000 states, 89000 events older than 7 days
+[2026-01-28 14:46:08] ✓ No orphaned entities found
+[2026-01-28 14:46:08] Would clean 3 deleted entities
+[2026-01-28 14:46:08] Using purge_keep_days: 14
+[2026-01-28 14:46:08] Would purge 139507 states, 5123 events older than 14 days
+[2026-01-28 14:46:08] ✓ No _2 suffix entities to fix
 
-[2026-01-15 20:00:00] ==================================================
-[2026-01-15 20:00:00] Summary:
-[2026-01-15 20:00:00]   Orphaned entities: 12
-[2026-01-15 20:00:00]   Deleted registry items: 53
-[2026-01-15 20:00:00] ==================================================
+[2026-01-28 14:46:08] ==================================================
+[2026-01-28 14:46:08] Summary:
+[2026-01-28 14:46:08]   Orphaned entities: 0
+[2026-01-28 14:46:08]   Deleted registry items: 3
+[2026-01-28 14:46:08]   Suffix fixes: 0
+[2026-01-28 14:46:08] ==================================================
 ```
 
-### Execute Cleanup
+---
 
-Run the actual cleanup (will stop/start HA automatically):
+## What Gets Cleaned
 
-```bash
-python3 ha-cleanup.py
-```
+### Orphaned Entities
+Entities that reference:
+- Deleted devices (device_id no longer exists)
+- Deleted config entries (integration removed)
+- Deleted automations (automation ID not found in YAML or UI)
 
-**What happens:**
+### _2 Suffix Fix
+When you remove and re-add an integration, HA sometimes appends `_2` to entity IDs:
+- `sensor.living_room_temperature_2` → `sensor.living_room_temperature`
 
-1. Stops Home Assistant
-2. Backs up registry files
-3. Removes orphaned entities
-4. Cleans deleted registry items
-5. Purges old database records
-6. Vacuums database
-7. Removes old backup files
-8. Starts Home Assistant
+### Deleted Registry Items
+Soft-deleted entries in:
+- `core.entity_registry` (deleted_entities)
+- `core.device_registry` (deleted_devices)
+
+### Database Purge
+Old records based on your `recorder.purge_keep_days` setting:
+- States older than X days
+- Events older than X days
+- Orphaned state_attributes and event_data
+- Runs VACUUM to reclaim disk space
 
 ---
 
@@ -144,31 +193,6 @@ The script automatically detects your Home Assistant config directory:
 
 ---
 
-## Automation (Optional)
-
-### Cron Job Example
-
-Run cleanup weekly on Sunday at 3 AM:
-
-```bash
-crontab -e
-
-# Add this line
-0 3 * * 0 /usr/bin/python3 /homeassistant/ha-cleanup.py >> /var/log/ha-cleanup.log 2>&1
-```
-
-### Home Assistant Shell Command
-
-Add to `configuration.yaml`:
-
-```yaml
-shell_command:
-  ha_cleanup_dry_run: "python3 /config/ha-cleanup.py --dry-run"
-  ha_cleanup: "python3 /config/ha-cleanup.py"
-```
-
----
-
 ## Troubleshooting
 
 ### Script Can't Find Config Directory
@@ -177,7 +201,7 @@ shell_command:
 Error: Could not find Home Assistant config directory
 ```
 
-**Solution**: Run from within the config directory or modify `CONFIG_PATHS` in the script.
+**Solution**: Run from within the config directory.
 
 ### Permission Denied
 
@@ -206,8 +230,8 @@ Ensure Home Assistant is fully stopped before running cleanup.
 |---------|-------------|
 | **Auto Backup** | Registry files backed up before modification |
 | **Dry Run** | Preview all changes without risk |
+| **Confirmation** | Asks before stopping HA |
 | **Graceful Stop** | Properly stops HA before database operations |
-| **Error Handling** | Continues on individual failures, reports at end |
 
 ---
 
@@ -261,8 +285,8 @@ If this script saved you from "ghost entity" headaches, consider supporting the 
 
 ---
 
-**Version**: 1.0.1  
-**Last Updated**: 2026-01-25  
+**Version**: 1.1.0  
+**Last Updated**: 2026-01-28  
 **Tested On**: Home Assistant 2024.x (HAOS, Docker, Core)
 
 ---
