@@ -78,9 +78,9 @@ python3 ha-cleanup.py
 ### Interactive Menu
 
 ```
-==================================================
+======================================================================
   Home Assistant Cleanup Tool
-==================================================
+======================================================================
   Config: /homeassistant
   Database: 1215.6 MB
 ======================================================================
@@ -146,11 +146,11 @@ When you select option 5, you'll see an interactive selection:
 
 ```
 Found 41 entities with numeric suffix:
-============================================================
+======================================================================
 ⚠️  WARNING: Not all suffixes are duplicates!
    Some are legitimate (e.g., button_4, sim_2, pm2_5)
    Review carefully before selecting.
-============================================================
+======================================================================
 
   [ 1] sensor.living_room_temperature_2
        -> sensor.living_room_temperature (climate)
@@ -179,9 +179,9 @@ The restore feature allows you to recover accidentally deleted entities from bac
 Select option **7** from the main menu to access the restore submenu:
 
 ```
-============================================================
+======================================================================
   Restore from Backup
-============================================================
+======================================================================
 
   1. List available backups
   2. Preview backup differences
@@ -199,7 +199,7 @@ Shows all backup files with timestamps, type, entity count, and file size:
 
 ```
 Found 26 backup files:
-============================================================
+======================================================================
 #    Timestamp            Type               Entities   Size (MB)
 ------------------------------------------------------------
 1    2026-02-08 11:40:23  entity_registry    1677       1.50
@@ -217,22 +217,22 @@ Backup: core.entity_registry.backup.20260208_114023
 Timestamp: 2026-02-08 11:40:23
 Entities in backup: 1677
 
-============================================================
+======================================================================
 DELETED ENTITIES (in backup but not in current): 3
-============================================================
+======================================================================
   1. sensor.living_room_temperature (mqtt)
      Name: Living Room Temperature
   2. light.bedroom_lamp (hue)
   3. switch.garage_door (homeassistant)
 
-============================================================
+======================================================================
 NEW ENTITIES (in current but not in backup): 1
-============================================================
+======================================================================
   1. sensor.new_sensor (homeassistant)
 
-============================================================
+======================================================================
 MODIFIED ENTITIES: 2
-============================================================
+======================================================================
   1. sensor.test
      disabled_by: None → user
 ```
@@ -254,7 +254,7 @@ Restore only specific entities from a backup:
 
 ```
 Found 3 deleted entities:
-============================================================
+======================================================================
   [ 1] sensor.living_room_temperature (mqtt)
        Name: Living Room Temperature
   [ 2] light.bedroom_lamp (hue)
@@ -487,11 +487,11 @@ This happens because the old entity ID is still in the "deleted_entities" list.
 
 ```
 Found 41 entities with numeric suffix:
-============================================================
+======================================================================
 ⚠️  WARNING: Not all suffixes are duplicates!
    Some are legitimate (e.g., button_4, sim_2, pm2_5)
    Review carefully before selecting.
-============================================================
+======================================================================
 
   [ 1] sensor.living_room_temperature_2
        -> sensor.living_room_temperature (mqtt)
