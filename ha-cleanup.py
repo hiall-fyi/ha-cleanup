@@ -8,6 +8,7 @@ Features:
   - Fix numeric suffix issues (_2, _3, etc.) on entity IDs
   - Clean deleted_entities and deleted_devices from registries
   - Purge old states/events and vacuum database
+  - Restore entities from backup files (selective or full restore)
   - Auto-detects recorder purge_keep_days from HA config
   - Auto-detects config path (HAOS, Docker, Core)
 
@@ -15,14 +16,17 @@ Usage:
   python3 ha-cleanup.py              # Interactive menu
   python3 ha-cleanup.py --dry-run    # Preview all changes
 """
+import fcntl
 import json
 import logging
+import os
 import re
 import shutil
 import sqlite3
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -64,9 +68,77 @@ SCENE_PATH = CONFIG_PATH / "scenes"
 
 # Defaults
 DEFAULT_PURGE_DAYS = 14
+BACKUP_RETENTION_DAYS = 7
+ENTITY_COUNT_DIFF_WARNING_THRESHOLD = 50  # Warn if backup differs by >50%
+HA_STOP_WAIT_SECONDS = 5
 
-# Regex pattern for numeric suffix (e.g., _2, _3, _10)
+# Regex patterns (compiled at module level for performance)
 NUMERIC_SUFFIX_PATTERN = re.compile(r'_(\d+)$')
+YAML_ID_PATTERN = re.compile(r'(?:^|\n)\s*-?\s*id:\s*["\']?([^"\'\n\r]+)["\']?')
+BACKUP_PATTERN = re.compile(r'\.backup\.(\d{8}_\d{6})$')
+DUPLICATE_SUFFIX_PATTERN = re.compile(r'_([2-9]|\d{2,})$')
+
+
+# ============================================================
+# Data Structures
+# ============================================================
+
+@dataclass
+class BackupInfo:
+    """Backup file metadata."""
+    path: Path
+    timestamp: datetime
+    file_type: str  # "entity_registry" or "device_registry"
+    size_mb: float
+    entity_count: int
+
+
+@dataclass
+class EntityDiff:
+    """Difference between backup and current registry."""
+    deleted: list[dict]      # In backup but not in current
+    new: list[dict]          # In current but not in backup
+    modified: list[tuple]    # (backup_entity, current_entity)
+
+
+# ============================================================
+# Simple Cache for JSON files
+# ============================================================
+
+_json_cache: dict[Path, tuple[float, dict]] = {}  # path -> (mtime, data)
+
+
+def _get_cached_json(path: Path) -> dict | None:
+    """Get cached JSON if file hasn't changed."""
+    if path not in _json_cache:
+        return None
+    
+    try:
+        current_mtime = path.stat().st_mtime
+        cached_mtime, cached_data = _json_cache[path]
+        if current_mtime == cached_mtime:
+            return cached_data
+    except OSError:
+        pass
+    
+    return None
+
+
+def _cache_json(path: Path, data: dict) -> None:
+    """Cache JSON data with file mtime."""
+    try:
+        mtime = path.stat().st_mtime
+        _json_cache[path] = (mtime, data)
+    except OSError:
+        pass
+
+
+def invalidate_cache(path: Path | None = None) -> None:
+    """Invalidate JSON cache for specific path or all."""
+    if path:
+        _json_cache.pop(path, None)
+    else:
+        _json_cache.clear()
 
 
 # ============================================================
@@ -87,21 +159,58 @@ def backup_file(path: Path) -> Path:
     return backup
 
 
-def load_json(path: Path) -> dict:
-    """Load JSON file with error handling."""
+def load_json(path: Path, use_cache: bool = True) -> dict:
+    """Load JSON file with error handling and optional caching."""
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
+    
+    # Check cache first
+    if use_cache:
+        cached = _get_cached_json(path)
+        if cached is not None:
+            return cached
+    
     try:
         with open(path, encoding='utf-8') as f:
-            return json.load(f)
+            data = json.load(f)
+            if use_cache:
+                _cache_json(path, data)
+            return data
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in {path}: {e}")
 
 
 def save_json(path: Path, data: dict) -> None:
-    """Save data to JSON file."""
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    """
+    Save data to JSON file with atomic write and file locking.
+    
+    This prevents race conditions when HA might be writing to the same file.
+    Uses a temporary file + atomic rename pattern.
+    """
+    temp_path = Path(f"{path}.tmp.{os.getpid()}")
+    
+    try:
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            # Acquire exclusive lock (blocks if HA is writing)
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())  # Force write to disk
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        
+        # Atomic rename (POSIX guarantees atomicity)
+        temp_path.replace(path)
+        
+        # Invalidate cache after write
+        invalidate_cache(path)
+        
+    except Exception as e:
+        # Clean up temp file on error
+        if temp_path.exists():
+            temp_path.unlink()
+        raise ValueError(f"Failed to save JSON to {path}: {e}")
 
 
 def get_db_size() -> float:
@@ -189,10 +298,8 @@ def extract_ids_from_yaml_file(path: Path) -> set:
     
     try:
         content = path.read_text(encoding='utf-8')
-        # Match id: value patterns, handling quotes and various formats
-        # Matches: "id: value", "- id: value", "id: 'value'", "id: \"value\""
-        pattern = r'(?:^|\n)\s*-?\s*id:\s*["\']?([^"\'\n\r]+)["\']?'
-        for match in re.finditer(pattern, content):
+        # Use pre-compiled pattern
+        for match in YAML_ID_PATTERN.finditer(content):
             id_value = match.group(1).strip()
             if id_value and not id_value.startswith('#'):
                 ids.add(id_value)
@@ -202,24 +309,35 @@ def extract_ids_from_yaml_file(path: Path) -> set:
     return ids
 
 
-def get_automation_ids() -> set:
-    """Get all automation IDs from YAML files and UI storage."""
+def get_entity_ids(entity_type: str, folder_path: Path, yaml_file: str, storage_file: str) -> set:
+    """
+    Generic function to get entity IDs from YAML files and UI storage.
+    
+    Args:
+        entity_type: Type of entity (automation, script, scene)
+        folder_path: Path to folder containing YAML files
+        yaml_file: Name of root YAML file (e.g., "automations.yaml")
+        storage_file: Name of storage file (e.g., "automations")
+    
+    Returns:
+        Set of entity IDs
+    """
     ids = set()
     
-    # Check automation/ folder
-    if AUTOMATION_PATH.exists():
-        for f in AUTOMATION_PATH.glob("*.yaml"):
+    # Check folder
+    if folder_path.exists():
+        for f in folder_path.glob("*.yaml"):
             ids.update(extract_ids_from_yaml_file(f))
     
-    # Check automations.yaml in config root
-    automations_yaml = CONFIG_PATH / "automations.yaml"
-    ids.update(extract_ids_from_yaml_file(automations_yaml))
+    # Check root YAML file
+    root_yaml = CONFIG_PATH / yaml_file
+    ids.update(extract_ids_from_yaml_file(root_yaml))
     
-    # Check UI-based automations in .storage
-    ui_automations = STORAGE_PATH / "automations"
-    if ui_automations.exists():
+    # Check UI-based storage
+    ui_storage = STORAGE_PATH / storage_file
+    if ui_storage.exists():
         try:
-            data = load_json(ui_automations)
+            data = load_json(ui_storage)
             for item in data.get("data", {}).get("items", []):
                 if item.get("id"):
                     ids.add(item["id"])
@@ -227,60 +345,21 @@ def get_automation_ids() -> set:
             pass
     
     return ids
+
+
+def get_automation_ids() -> set:
+    """Get all automation IDs from YAML files and UI storage."""
+    return get_entity_ids("automation", AUTOMATION_PATH, "automations.yaml", "automations")
 
 
 def get_script_ids() -> set:
     """Get all script IDs from YAML files and UI storage."""
-    ids = set()
-    
-    # Check scripts/ folder
-    if SCRIPT_PATH.exists():
-        for f in SCRIPT_PATH.glob("*.yaml"):
-            ids.update(extract_ids_from_yaml_file(f))
-    
-    # Check scripts.yaml in config root
-    scripts_yaml = CONFIG_PATH / "scripts.yaml"
-    ids.update(extract_ids_from_yaml_file(scripts_yaml))
-    
-    # Check UI-based scripts in .storage
-    ui_scripts = STORAGE_PATH / "scripts"
-    if ui_scripts.exists():
-        try:
-            data = load_json(ui_scripts)
-            for item in data.get("data", {}).get("items", []):
-                if item.get("id"):
-                    ids.add(item["id"])
-        except (FileNotFoundError, ValueError, KeyError):
-            pass
-    
-    return ids
+    return get_entity_ids("script", SCRIPT_PATH, "scripts.yaml", "scripts")
 
 
 def get_scene_ids() -> set:
     """Get all scene IDs from YAML files and UI storage."""
-    ids = set()
-    
-    # Check scenes/ folder
-    if SCENE_PATH.exists():
-        for f in SCENE_PATH.glob("*.yaml"):
-            ids.update(extract_ids_from_yaml_file(f))
-    
-    # Check scenes.yaml in config root
-    scenes_yaml = CONFIG_PATH / "scenes.yaml"
-    ids.update(extract_ids_from_yaml_file(scenes_yaml))
-    
-    # Check UI-based scenes in .storage
-    ui_scenes = STORAGE_PATH / "scenes"
-    if ui_scenes.exists():
-        try:
-            data = load_json(ui_scenes)
-            for item in data.get("data", {}).get("items", []):
-                if item.get("id"):
-                    ids.add(item["id"])
-        except (FileNotFoundError, ValueError, KeyError):
-            pass
-    
-    return ids
+    return get_entity_ids("scene", SCENE_PATH, "scenes.yaml", "scenes")
 
 
 
@@ -313,7 +392,7 @@ def find_orphaned_entities() -> list:
         log(f"⚠️  Error loading registry files: {e}")
         return []
     
-    # Build lookup sets
+    # Build lookup sets (use set comprehension for better performance)
     devices = {d["id"] for d in device_data.get("data", {}).get("devices", [])}
     config_entries = {e["entry_id"] for e in config_data.get("data", {}).get("entries", [])}
     
@@ -461,10 +540,11 @@ def purge_database(dry_run: bool = False) -> tuple:
                 log(f"{'Would purge' if dry_run else 'Purging'} {states} states, {events} events older than {purge_days} days")
                 
                 if not dry_run:
+                    # Execute all deletes in single transaction (already in context manager)
                     cur.execute("DELETE FROM states WHERE last_updated_ts < ?", (cutoff_ts,))
                     cur.execute("DELETE FROM events WHERE time_fired_ts < ?", (cutoff_ts,))
                     
-                    # Clean orphaned attributes and event data
+                    # Clean orphaned attributes and event data in same transaction
                     cur.execute("""
                         DELETE FROM state_attributes 
                         WHERE NOT EXISTS (
@@ -480,7 +560,10 @@ def purge_database(dry_run: bool = False) -> tuple:
                         )
                     """)
                     
+                    # Commit all changes at once
                     conn.commit()
+                    
+                    # Vacuum after commit
                     conn.execute("VACUUM")
                     log("✓ Database purged and vacuumed")
             else:
@@ -494,24 +577,568 @@ def purge_database(dry_run: bool = False) -> tuple:
 
 
 def cleanup_old_backups() -> int:
-    """Remove backup files older than 7 days."""
-    cutoff = (datetime.now() - timedelta(days=7)).timestamp()
+    """Remove backup files older than BACKUP_RETENTION_DAYS."""
+    cutoff = (datetime.now() - timedelta(days=BACKUP_RETENTION_DAYS)).timestamp()
     removed = 0
     
+    # Count total backup files
+    total_backups = len(list(STORAGE_PATH.glob("*.backup.*")))
+    
+    # Batch collect files to remove (avoid multiple stat calls)
+    files_to_remove = []
     for f in STORAGE_PATH.glob("*.backup.*"):
         try:
             if f.stat().st_mtime < cutoff:
-                f.unlink()
-                removed += 1
+                files_to_remove.append(f)
+        except OSError:
+            pass
+    
+    # Remove collected files
+    for f in files_to_remove:
+        try:
+            f.unlink()
+            removed += 1
         except OSError:
             pass
     
     if removed:
-        log(f"✓ Removed {removed} old backup files")
+        log(f"✓ Removed {removed} old backup files (older than {BACKUP_RETENTION_DAYS} days)")
     else:
-        log("✓ No old backup files to remove")
+        if total_backups > 0:
+            log(f"✓ No old backup files to remove (found {total_backups} backups, all within {BACKUP_RETENTION_DAYS} days)")
+        else:
+            log("✓ No backup files found")
     
     return removed
+
+
+# ============================================================
+# Restore Functions
+# ============================================================
+
+def scan_backup_files() -> list[BackupInfo]:
+    """
+    Scan .storage/ folder for backup files.
+
+    Returns list of BackupInfo sorted by timestamp (newest first).
+    """
+    backups = []
+
+    for backup_file in STORAGE_PATH.glob("*.backup.*"):
+        try:
+            # Get file stats once (optimization: avoid multiple stat() calls)
+            file_stat = backup_file.stat()
+
+            # Parse timestamp from filename using pre-compiled pattern
+            match = BACKUP_PATTERN.search(backup_file.name)
+            if not match:
+                # Fallback to file mtime if timestamp not in filename
+                timestamp = datetime.fromtimestamp(file_stat.st_mtime)
+            else:
+                timestamp_str = match.group(1)
+                timestamp = datetime.strptime(timestamp_str, '%Y%m%d_%H%M%S')
+
+            # Determine file type
+            if 'entity_registry' in backup_file.name:
+                file_type = 'entity_registry'
+            elif 'device_registry' in backup_file.name:
+                file_type = 'device_registry'
+            else:
+                file_type = 'unknown'
+
+            # Load JSON and count entities
+            try:
+                data = load_json(backup_file, use_cache=False)  # Don't cache backups
+                entity_count = len(data.get('data', {}).get('entities', []))
+            except (ValueError, KeyError):
+                # Corrupted file, skip
+                log(f"⚠️  Skipping corrupted backup: {backup_file.name}")
+                continue
+
+            # Calculate file size (use cached stat)
+            size_mb = file_stat.st_size / (1024 * 1024)
+
+            backups.append(BackupInfo(
+                path=backup_file,
+                timestamp=timestamp,
+                file_type=file_type,
+                size_mb=size_mb,
+                entity_count=entity_count
+            ))
+
+        except (OSError, ValueError) as e:
+            log(f"⚠️  Error reading backup {backup_file.name}: {e}")
+            continue
+
+    # Sort by timestamp (newest first)
+    backups.sort(key=lambda b: b.timestamp, reverse=True)
+
+    return backups
+
+
+def compare_registries(backup_data: dict, current_data: dict) -> EntityDiff:
+    """
+    Compare backup and current registry to find differences.
+
+    Returns EntityDiff with deleted, new, and modified entities.
+    """
+    # Build entity_id -> entity dict for both registries
+    backup_entities = {
+        e['entity_id']: e
+        for e in backup_data.get('data', {}).get('entities', [])
+    }
+    current_entities = {
+        e['entity_id']: e
+        for e in current_data.get('data', {}).get('entities', [])
+    }
+
+    backup_ids = set(backup_entities.keys())
+    current_ids = set(current_entities.keys())
+
+    # Find deleted entities (in backup but not in current)
+    deleted = [backup_entities[eid] for eid in (backup_ids - current_ids)]
+
+    # Find new entities (in current but not in backup)
+    new = [current_entities[eid] for eid in (current_ids - backup_ids)]
+
+    # Find modified entities (compare attributes for common entity_ids)
+    # Use set of attributes to compare for faster comparison
+    attrs_to_compare = {'platform', 'device_id', 'config_entry_id', 'original_name', 'disabled_by'}
+    modified = []
+    common_ids = backup_ids & current_ids
+
+    for eid in common_ids:
+        backup_entity = backup_entities[eid]
+        current_entity = current_entities[eid]
+
+        # Quick comparison using any() for early exit
+        if any(backup_entity.get(attr) != current_entity.get(attr) for attr in attrs_to_compare):
+            modified.append((backup_entity, current_entity))
+
+    return EntityDiff(deleted=deleted, new=new, modified=modified)
+
+
+def preview_backup_diff(backup_info: BackupInfo) -> None:
+    """
+    Display differences between backup and current registry.
+    """
+    # Load backup and current registry
+    try:
+        backup_data = load_json(backup_info.path, use_cache=False)
+        current_data = load_json(ENTITY_REGISTRY)
+    except (FileNotFoundError, ValueError) as e:
+        log(f"⚠️  Error loading registries: {e}")
+        return
+
+    # Compare registries
+    diff = compare_registries(backup_data, current_data)
+
+    # Display backup metadata
+    print(f"\nBackup: {backup_info.path.name}")
+    print(f"Timestamp: {backup_info.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Entities in backup: {backup_info.entity_count}")
+    print()
+
+    # Display deleted entities
+    print("=" * 60)
+    print(f"DELETED ENTITIES (in backup but not in current): {len(diff.deleted)}")
+    print("=" * 60)
+    if diff.deleted:
+        for i, entity in enumerate(diff.deleted, 1):
+            entity_id = entity.get('entity_id', 'unknown')
+            platform = entity.get('platform', 'unknown')
+            name = entity.get('original_name', '')
+            print(f"  {i:2d}. {entity_id} ({platform})")
+            if name:
+                print(f"      Name: {name}")
+    else:
+        print("  None")
+    print()
+
+    # Display new entities
+    print("=" * 60)
+    print(f"NEW ENTITIES (in current but not in backup): {len(diff.new)}")
+    print("=" * 60)
+    if diff.new:
+        for i, entity in enumerate(diff.new, 1):
+            entity_id = entity.get('entity_id', 'unknown')
+            platform = entity.get('platform', 'unknown')
+            print(f"  {i:2d}. {entity_id} ({platform})")
+    else:
+        print("  None")
+    print()
+
+    # Display modified entities
+    print("=" * 60)
+    print(f"MODIFIED ENTITIES: {len(diff.modified)}")
+    print("=" * 60)
+    if diff.modified:
+        for i, (backup_entity, current_entity) in enumerate(diff.modified, 1):
+            entity_id = backup_entity.get('entity_id', 'unknown')
+            print(f"  {i:2d}. {entity_id}")
+
+            # Show what changed (use set for faster lookup)
+            attrs = {'platform', 'device_id', 'config_entry_id', 'original_name', 'disabled_by'}
+            for attr in attrs:
+                backup_val = backup_entity.get(attr)
+                current_val = current_entity.get(attr)
+                if backup_val != current_val:
+                    print(f"      {attr}: {backup_val} → {current_val}")
+    else:
+        print("  None")
+    print()
+
+
+def selective_restore_entities(backup_info: BackupInfo, dry_run: bool = False) -> int:
+    """
+    Restore selected entities from backup.
+
+    Returns count of restored entities.
+    """
+    # Load backup and current registry
+    try:
+        backup_data = load_json(backup_info.path, use_cache=False)
+        current_data = load_json(ENTITY_REGISTRY)
+    except (FileNotFoundError, ValueError) as e:
+        log(f"⚠️  Error loading registries: {e}")
+        return 0
+
+    # Compare registries to find deleted entities
+    diff = compare_registries(backup_data, current_data)
+
+    if not diff.deleted:
+        log("✓ No deleted entities to restore")
+        return 0
+
+    # Display deleted entities with numbering
+    print(f"\nFound {len(diff.deleted)} deleted entities:")
+    print("=" * 60)
+    for i, entity in enumerate(diff.deleted, 1):
+        entity_id = entity.get('entity_id', 'unknown')
+        platform = entity.get('platform', 'unknown')
+        name = entity.get('original_name', '')
+        print(f"  [{i:2d}] {entity_id} ({platform})")
+        if name:
+            print(f"       Name: {name}")
+    print()
+
+    # Prompt user for selection
+    print("Enter selection:")
+    print("  - Numbers: 1,3,5 or 1-5 or 1,3-5,8")
+    print("  - 'all' to restore all")
+    print("  - 'none' or Enter to skip")
+    print()
+
+    try:
+        selection = input("Selection: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.")
+        return 0
+
+    indices = parse_selection(selection, len(diff.deleted))
+
+    if not indices:
+        log("No entities selected, skipping")
+        return 0
+
+    # Get selected entities
+    selected_entities = [diff.deleted[i - 1] for i in sorted(indices)]
+
+    # Display selected entities and confirm
+    print(f"\nWill restore {len(selected_entities)} entities:")
+    for entity in selected_entities:
+        entity_id = entity.get('entity_id', 'unknown')
+        platform = entity.get('platform', 'unknown')
+        print(f"  - {entity_id} ({platform})")
+    print()
+
+    if dry_run:
+        log(f"DRY RUN: Would restore {len(selected_entities)} entities")
+        return len(selected_entities)
+
+    if not confirm_action(f"Restore these {len(selected_entities)} entities?"):
+        print("Aborted.")
+        return 0
+
+    # Stop HA
+    log("Stopping Home Assistant...")
+    method = stop_ha()
+    if not method:
+        log("⚠️  Could not stop HA automatically.")
+        if not confirm_action("Please stop HA manually. Continue when stopped?"):
+            return 0
+
+    time.sleep(HA_STOP_WAIT_SECONDS)
+
+    try:
+        # Backup current registry
+        backup_file(ENTITY_REGISTRY)
+
+        # Merge selected entities into current registry
+        current_entity_ids = {e['entity_id'] for e in current_data['data']['entities']}
+        restored_count = 0
+
+        for entity in selected_entities:
+            entity_id = entity.get('entity_id')
+            if entity_id in current_entity_ids:
+                log(f"⚠️  Skipping {entity_id} (already exists)")
+                continue
+
+            current_data['data']['entities'].append(entity)
+            restored_count += 1
+
+        # Save registry
+        save_json(ENTITY_REGISTRY, current_data)
+        log(f"✓ Restored {restored_count} entities")
+
+        return restored_count
+
+    finally:
+        # Start HA
+        log("Starting Home Assistant...")
+        if method:
+            if not start_ha(method):
+                log("⚠️  Failed to start HA. Please start manually.")
+        else:
+            log("Please start Home Assistant manually.")
+
+
+def full_restore_registry(backup_info: BackupInfo, dry_run: bool = False) -> int:
+    """
+    Fully restore registry from backup.
+
+    Returns entity count from backup.
+    """
+    # Load and validate backup file
+    try:
+        backup_data = load_json(backup_info.path, use_cache=False)
+    except (FileNotFoundError, ValueError) as e:
+        log(f"⚠️  Error loading backup: {e}")
+        return 0
+
+    # Check data.entities exists
+    if 'data' not in backup_data or 'entities' not in backup_data['data']:
+        log("⚠️  Invalid backup format: missing data.entities")
+        return 0
+
+    backup_entity_count = len(backup_data['data']['entities'])
+
+    # Load current registry and count entities
+    try:
+        current_data = load_json(ENTITY_REGISTRY)
+        current_entity_count = len(current_data['data']['entities'])
+    except (FileNotFoundError, ValueError):
+        current_entity_count = 0
+
+    # Display entity count difference
+    print(f"\nBackup: {backup_info.path.name}")
+    print(f"Timestamp: {backup_info.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Entities in backup: {backup_entity_count}")
+    print(f"Entities in current: {current_entity_count}")
+    print(f"Difference: {backup_entity_count - current_entity_count:+d}")
+    print()
+
+    # Warn if difference > threshold
+    if current_entity_count > 0:
+        diff_percent = abs(backup_entity_count - current_entity_count) / current_entity_count * 100
+        if diff_percent > ENTITY_COUNT_DIFF_WARNING_THRESHOLD:
+            print(f"⚠️  WARNING: Entity count differs by {diff_percent:.1f}%!")
+            print("   This is a significant change. Review carefully.")
+            print()
+
+    if dry_run:
+        log(f"DRY RUN: Would restore {backup_entity_count} entities")
+        return backup_entity_count
+
+    # Confirm action
+    if not confirm_action("Fully restore registry from this backup?"):
+        print("Aborted.")
+        return 0
+
+    # Stop HA
+    log("Stopping Home Assistant...")
+    method = stop_ha()
+    if not method:
+        log("⚠️  Could not stop HA automatically.")
+        if not confirm_action("Please stop HA manually. Continue when stopped?"):
+            return 0
+
+    time.sleep(HA_STOP_WAIT_SECONDS)
+
+    try:
+        # Backup current registry
+        backup_file(ENTITY_REGISTRY)
+
+        # Copy backup file to registry path
+        shutil.copy2(backup_info.path, ENTITY_REGISTRY)
+        log(f"✓ Restored {backup_entity_count} entities from backup")
+
+        return backup_entity_count
+
+    finally:
+        # Start HA
+        log("Starting Home Assistant...")
+        if method:
+            if not start_ha(method):
+                log("⚠️  Failed to start HA. Please start manually.")
+        else:
+            log("Please start Home Assistant manually.")
+
+
+def restore_menu() -> None:
+    """Interactive restore menu."""
+    # Cache backups list to avoid repeated scanning
+    cached_backups = None
+    
+    while True:
+        print("\n" + "=" * 70)
+        print("  Restore from Backup")
+        print("=" * 70)
+        print()
+        print("  1. List available backups")
+        print("  2. Preview backup differences")
+        print("  3. Selective restore entities")
+        print("  4. Full restore registry")
+        print()
+        print("  r. Refresh backup list")
+        print("  b. Back to main menu")
+        print()
+
+        try:
+            choice = input("  Select option: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nReturning to main menu...")
+            break
+
+        if choice == 'b':
+            break
+        
+        elif choice == 'r':
+            # Refresh backup list
+            cached_backups = None
+            log("✓ Backup list refreshed")
+            continue
+
+        elif choice == '1':
+            # List available backups
+            if cached_backups is None:
+                cached_backups = scan_backup_files()
+            
+            if not cached_backups:
+                log("No backup files found")
+                continue
+
+            print(f"\nFound {len(cached_backups)} backup files:")
+            print("=" * 60)
+            print(f"{'#':<4} {'Timestamp':<20} {'Type':<18} {'Entities':<10} {'Size (MB)':<10}")
+            print("-" * 60)
+
+            for i, backup in enumerate(cached_backups, 1):
+                timestamp_str = backup.timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                print(f"{i:<4} {timestamp_str:<20} {backup.file_type:<18} {backup.entity_count:<10} {backup.size_mb:<10.2f}")
+            print()
+
+        elif choice == '2':
+            # Preview backup differences
+            if cached_backups is None:
+                cached_backups = scan_backup_files()
+            
+            if not cached_backups:
+                log("No backup files found")
+                continue
+
+            # Show list
+            print(f"\nAvailable backups:")
+            for i, backup in enumerate(cached_backups, 1):
+                timestamp_str = backup.timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                print(f"  [{i}] {timestamp_str} - {backup.file_type} ({backup.entity_count} entities)")
+            print()
+
+            try:
+                selection = input("Select backup number (or Enter to cancel): ").strip()
+                if not selection:
+                    continue
+
+                idx = int(selection) - 1
+                if 0 <= idx < len(cached_backups):
+                    preview_backup_diff(cached_backups[idx])
+                else:
+                    print("Invalid selection")
+            except (ValueError, EOFError, KeyboardInterrupt):
+                print("Invalid selection")
+
+        elif choice == '3':
+            # Selective restore entities
+            if cached_backups is None:
+                cached_backups = scan_backup_files()
+            
+            if not cached_backups:
+                log("No backup files found")
+                continue
+
+            # Show list
+            print(f"\nAvailable backups:")
+            for i, backup in enumerate(cached_backups, 1):
+                timestamp_str = backup.timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                print(f"  [{i}] {timestamp_str} - {backup.file_type} ({backup.entity_count} entities)")
+            print()
+
+            try:
+                selection = input("Select backup number (or Enter to cancel): ").strip()
+                if not selection:
+                    continue
+
+                idx = int(selection) - 1
+                if 0 <= idx < len(cached_backups):
+                    selective_restore_entities(cached_backups[idx])
+                    # Invalidate cache after restore
+                    cached_backups = None
+                    invalidate_cache()
+                else:
+                    print("Invalid selection")
+            except (ValueError, EOFError, KeyboardInterrupt):
+                print("Invalid selection")
+
+        elif choice == '4':
+            # Full restore registry
+            if cached_backups is None:
+                cached_backups = scan_backup_files()
+            
+            if not cached_backups:
+                log("No backup files found")
+                continue
+
+            # Show list
+            print(f"\nAvailable backups:")
+            for i, backup in enumerate(cached_backups, 1):
+                timestamp_str = backup.timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                print(f"  [{i}] {timestamp_str} - {backup.file_type} ({backup.entity_count} entities)")
+            print()
+
+            try:
+                selection = input("Select backup number (or Enter to cancel): ").strip()
+                if not selection:
+                    continue
+
+                idx = int(selection) - 1
+                if 0 <= idx < len(cached_backups):
+                    full_restore_registry(cached_backups[idx])
+                    # Invalidate cache after restore
+                    cached_backups = None
+                    invalidate_cache()
+                else:
+                    print("Invalid selection")
+            except (ValueError, EOFError, KeyboardInterrupt):
+                print("Invalid selection")
+
+        else:
+            print("Invalid option, try again.")
+
+
+
+
+
+
 
 
 def find_suffix_entities() -> list:
@@ -537,16 +1164,14 @@ def find_suffix_entities() -> list:
     # Build set of all entity IDs for quick lookup
     all_entity_ids = {e.get("entity_id", "") for e in entities}
     
-    # Pattern for numeric suffix: _2, _3, _4, etc. (NOT _0 or _1)
-    duplicate_suffix_pattern = re.compile(r'_([2-9]|\d{2,})$')
-    
+    # Use pre-compiled pattern
     candidates = []
     for entity in entities:
         entity_id = entity.get("entity_id", "")
         platform = entity.get("platform", "")
         
         # Check if entity_id ends with numeric suffix (_2, _3, etc.)
-        match = duplicate_suffix_pattern.search(entity_id)
+        match = DUPLICATE_SUFFIX_PATTERN.search(entity_id)
         if not match:
             continue
         
@@ -576,6 +1201,7 @@ def parse_selection(selection: str, max_num: int) -> set:
     """
     selection = selection.strip().lower()
     
+    # Early return for special cases
     if selection in ('', 'none', 'n', 'q'):
         return set()
     
@@ -595,9 +1221,7 @@ def parse_selection(selection: str, max_num: int) -> set:
                 start, end = part.split('-', 1)
                 start = int(start)
                 end = int(end)
-                for i in range(start, end + 1):
-                    if 1 <= i <= max_num:
-                        indices.add(i)
+                indices.update(range(start, end + 1))
             except ValueError:
                 pass
         else:
@@ -609,7 +1233,8 @@ def parse_selection(selection: str, max_num: int) -> set:
             except ValueError:
                 pass
     
-    return indices
+    # Filter out invalid indices
+    return {i for i in indices if 1 <= i <= max_num}
 
 
 def fix_entity_suffix(dry_run: bool = False) -> int:
@@ -693,21 +1318,22 @@ def fix_entity_suffix(dry_run: bool = False) -> int:
 
 def print_menu() -> None:
     """Print interactive menu."""
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 70)
     print("  Home Assistant Cleanup Tool")
-    print("=" * 50)
+    print("=" * 70)
     print(f"  Config: {CONFIG_PATH}")
     db_size = get_db_size()
     if db_size:
         print(f"  Database: {db_size:.1f} MB")
-    print("=" * 50)
+    print("=" * 70)
     print()
-    print("  1. Full cleanup (all operations)")
-    print("  2. Remove orphaned entities")
-    print("  3. Clean deleted registry items")
-    print("  4. Purge old database records")
-    print("  5. Fix numeric suffix (_2, _3, etc.)")
-    print("  6. Clean old backup files")
+    print("  1. Full cleanup (options 2-4, 6)")
+    print("  2. Remove orphaned entities (missing device/config/definition)")
+    print("  3. Clean deleted registry items (deleted_entities/devices)")
+    print(f"  4. Purge old database records (auto-detect purge_keep_days)")
+    print("  5. Fix numeric suffix (_2, _3, etc.) - interactive")
+    print(f"  6. Clean old backup files (>{BACKUP_RETENTION_DAYS} days)")
+    print("  7. Restore from backup (selective or full)")
     print()
     print("  d. Dry run (preview all)")
     print("  q. Quit")
@@ -742,7 +1368,7 @@ def run_with_ha_restart(operations: list, dry_run: bool = False) -> None:
             return
     
     # Wait for HA to fully stop
-    time.sleep(5)
+    time.sleep(HA_STOP_WAIT_SECONDS)
     
     db_before = get_db_size()
     
@@ -762,6 +1388,9 @@ def run_with_ha_restart(operations: list, dry_run: bool = False) -> None:
                 log(f"Database: {db_before:.1f} MB → {db_after:.1f} MB ({saved:.1f} MB saved)")
     
     finally:
+        # Invalidate cache after operations
+        invalidate_cache()
+        
         log("Starting Home Assistant...")
         if method:
             if not start_ha(method):
@@ -781,14 +1410,14 @@ def interactive_menu() -> None:
         except (EOFError, KeyboardInterrupt):
             print("\nBye!")
             break
-        
+
         if choice == 'q':
             print("Bye!")
             break
         elif choice == 'd':
-            print("\n" + "=" * 50)
+            print("\n" + "=" * 70)
             log("DRY RUN - Preview all changes")
-            print("=" * 50 + "\n")
+            print("=" * 70 + "\n")
             cleanup_orphaned_entities(dry_run=True)
             cleanup_deleted_items(dry_run=True)
             purge_database(dry_run=True)
@@ -813,22 +1442,25 @@ def interactive_menu() -> None:
             if not candidates:
                 log("✓ No numeric suffix entities found")
                 continue
-            
+
             if not confirm_action("This will stop Home Assistant. Continue?"):
                 print("Aborted.")
                 continue
-            
+
             log("Stopping Home Assistant...")
             method = stop_ha()
             if not method:
                 log("⚠️  Could not stop HA automatically.")
                 if not confirm_action("Please stop HA manually. Continue when stopped?"):
                     continue
-            time.sleep(5)
-            
+            time.sleep(HA_STOP_WAIT_SECONDS)
+
             try:
                 fix_entity_suffix(dry_run=False)
             finally:
+                # Invalidate cache after suffix fix
+                invalidate_cache()
+                
                 log("Starting Home Assistant...")
                 if method:
                     if not start_ha(method):
@@ -838,6 +1470,8 @@ def interactive_menu() -> None:
             log("Done!")
         elif choice == '6':
             cleanup_old_backups()
+        elif choice == '7':
+            restore_menu()
         else:
             print("Invalid option, try again.")
 
@@ -870,6 +1504,12 @@ def main() -> None:
         log("=" * 50)
     else:
         interactive_menu()
+
+
+
+
+
+
 
 
 if __name__ == "__main__":
