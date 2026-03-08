@@ -3,13 +3,16 @@
 <div align="center">
 
 <!-- Platform Badges -->
-![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1+-blue?style=for-the-badge&logo=home-assistant) ![Python](https://img.shields.io/badge/Python-3.8+-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.3+-blue?style=for-the-badge&logo=home-assistant) ![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 
 <!-- Status Badges -->
-![Version](https://img.shields.io/badge/Version-1.3.0-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.4.0-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
 
 <!-- Community Badges -->
 ![GitHub stars](https://img.shields.io/github/stars/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub forks](https://img.shields.io/github/forks/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub issues](https://img.shields.io/github/issues/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub last commit](https://img.shields.io/github/last-commit/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github)
+
+<!-- Support -->
+[![Buy Me A Coffee](https://img.shields.io/badge/Support-Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/hiallfyi)
 
 **Interactive cleanup tool for Home Assistant - Remove orphaned entities, fix entity suffixes, clean registries, purge old database records, and restore from backups.**
 
@@ -51,7 +54,7 @@ Home Assistant accumulates "ghost entities" over time - entities that persist af
 ## Prerequisites
 
 - **Home Assistant**: Any installation type (HAOS, Docker, Core)
-- **Python**: 3.8 or higher
+- **Python**: 3.12 or higher
 - **Access**: SSH or terminal access to HA config directory
 
 ---
@@ -712,21 +715,15 @@ If you find this script useful, please consider giving it a star!
 
 <div align="center">
 
-### Support This Project
-
-If this script saved you from "ghost entity" headaches, consider supporting the project!
-
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/hiallfyi)
-
-**Made with love by Joe Yiu ([@hiall-fyi](https://github.com/hiall-fyi))**
+**Made with ❤️ by Joe Yiu ([@hiall-fyi](https://github.com/hiall-fyi))**
 
 </div>
 
 ---
 
-**Version**: 1.3.0  
-**Last Updated**: 2026-02-08  
-**Tested On**: Home Assistant 2024.x (HAOS, Docker, Core)
+**Version**: 1.4.0  
+**Last Updated**: 2026-03-08  
+**Tested On**: Home Assistant 2026.3.1 (HAOS, Docker, Core)
 
 ---
 
