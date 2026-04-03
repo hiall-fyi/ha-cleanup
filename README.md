@@ -6,7 +6,7 @@
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.3+-blue?style=for-the-badge&logo=home-assistant) ![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 
 <!-- Status Badges -->
-![Version](https://img.shields.io/badge/Version-1.4.0-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.5.0-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
 
 <!-- Community Badges -->
 ![GitHub stars](https://img.shields.io/github/stars/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub forks](https://img.shields.io/github/forks/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub issues](https://img.shields.io/github/issues/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub last commit](https://img.shields.io/github/last-commit/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github)
@@ -82,10 +82,10 @@ python3 ha-cleanup.py
 
 ```
 ======================================================================
-  Home Assistant Cleanup Tool
+  Home Assistant Cleanup Tool  v1.5.0
 ======================================================================
   Config: /homeassistant
-  Database: 1215.6 MB
+  Database: 4768.8 MB
 ======================================================================
 
   1. Full cleanup (options 2-4, 6)
@@ -121,26 +121,27 @@ python3 ha-cleanup.py
 Select `d` from the menu to preview all changes:
 
 ```
-[2026-01-28 14:46:08] ==================================================
-[2026-01-28 14:46:08] Home Assistant Cleanup (DRY RUN)
-[2026-01-28 14:46:08] ==================================================
-[2026-01-28 14:46:08] Config path: /homeassistant
-[2026-01-28 14:46:08] Database size: 1215.6 MB
+[2026-04-03 11:08:00] ==================================================
+[2026-04-03 11:08:00] Home Assistant Cleanup (DRY RUN)
+[2026-04-03 11:08:00] ==================================================
+[2026-04-03 11:08:00] Config path: /homeassistant
+[2026-04-03 11:08:00] Database size: 4768.8 MB
 
-[2026-01-28 14:46:08] ✓ No orphaned entities found
-[2026-01-28 14:46:08] Would clean 3 deleted entities
-[2026-01-28 14:46:08] Using purge_keep_days: 7
-[2026-01-28 14:46:08] Would purge 139507 states, 5123 events older than 7 days
-[2026-01-28 14:46:08] Found 5 entities with numeric suffix:
-[2026-01-28 14:46:08]   - sensor.living_room_temperature_2 -> sensor.living_room_temperature (climate)
+[2026-04-03 11:08:01] ✓ No orphaned entities found
+[2026-04-03 11:08:01] Would clean 400 deleted entities
+[2026-04-03 11:08:01] Would clean 83 deleted devices
+[2026-04-03 11:08:01] Using purge_keep_days: 14
+[2026-04-03 11:08:10] Would purge 7,056,691 states, 131,008 events older than 14 days
+[2026-04-03 11:08:10] Found 5 entities with numeric suffix:
+[2026-04-03 11:08:10]   - sensor.living_room_temperature_2 -> sensor.living_room_temperature (climate)
 ...
 
-[2026-01-28 14:46:08] ==================================================
-[2026-01-28 14:46:08] Summary:
-[2026-01-28 14:46:08]   Orphaned entities: 0
-[2026-01-28 14:46:08]   Deleted registry items: 3
-[2026-01-28 14:46:08]   Suffix fixes: 5
-[2026-01-28 14:46:08] ==================================================
+[2026-04-03 11:08:10] ==================================================
+[2026-04-03 11:08:10] Summary:
+[2026-04-03 11:08:10]   Orphaned entities: 0
+[2026-04-03 11:08:10]   Deleted registry items: 483
+[2026-04-03 11:08:10]   Suffix fixes: 5
+[2026-04-03 11:08:10] ==================================================
 ```
 
 ### Numeric Suffix Fix (Interactive)
@@ -191,6 +192,7 @@ Select option **7** from the main menu to access the restore submenu:
   3. Selective restore entities
   4. Full restore registry
 
+  r. Refresh backup list
   b. Back to main menu
 ```
 
@@ -201,13 +203,13 @@ Select option **7** from the main menu to access the restore submenu:
 Shows all backup files with timestamps, type, entity count, and file size:
 
 ```
-Found 26 backup files:
+Found 6 backup files:
 ======================================================================
 #    Timestamp            Type               Entities   Size (MB)
 ------------------------------------------------------------
-1    2026-02-08 11:40:23  entity_registry    1677       1.50
-2    2026-02-08 11:40:23  device_registry    0          0.12
-3    2026-02-07 21:17:00  entity_registry    1711       1.58
+1    2026-04-03 11:09:11  entity_registry    1677       1.50
+2    2026-04-03 11:09:11  device_registry    0          0.12
+3    2026-04-01 21:17:00  entity_registry    1711       1.58
 ...
 ```
 
@@ -216,8 +218,8 @@ Found 26 backup files:
 Compare a backup with your current registry to see what changed:
 
 ```
-Backup: core.entity_registry.backup.20260208_114023
-Timestamp: 2026-02-08 11:40:23
+Backup: core.entity_registry.backup.20260403_110911
+Timestamp: 2026-04-03 11:09:11
 Entities in backup: 1677
 
 ======================================================================
@@ -282,8 +284,8 @@ Will restore 2 entities:
 Completely restore the entire registry from a backup:
 
 ```
-Backup: core.entity_registry.backup.20260208_114023
-Timestamp: 2026-02-08 11:40:23
+Backup: core.entity_registry.backup.20260403_110911
+Timestamp: 2026-04-03 11:09:11
 Entities in backup: 1677
 Entities in current: 1680
 Difference: -3
@@ -325,16 +327,17 @@ Runs all cleanup operations in sequence (except suffix fix which requires manual
 
 ```
 ⚠️  This will stop Home Assistant. Continue? [y/N]: y
-[2026-02-08 12:00:00] Stopping Home Assistant...
-[2026-02-08 12:00:05] ✓ Removed 5 orphaned entities
-[2026-02-08 12:00:06] ✓ Cleaned 3 deleted entities
-[2026-02-08 12:00:07] Using purge_keep_days: 7
-[2026-02-08 12:00:08] Purging 139507 states, 5123 events older than 7 days
-[2026-02-08 12:00:45] ✓ Database purged and vacuumed
-[2026-02-08 12:00:46] ✓ Removed 2 old backup files
-[2026-02-08 12:00:46] Database: 1215.6 MB → 987.3 MB (228.3 MB saved)
-[2026-02-08 12:00:46] Starting Home Assistant...
-[2026-02-08 12:00:51] Done!
+[2026-04-03 11:09:40] Stopping Home Assistant...
+[2026-04-03 11:10:01] ✓ Removed 5 orphaned entities
+[2026-04-03 11:10:02] ✓ Cleaned 400 deleted entities
+[2026-04-03 11:10:02] ✓ Cleaned 83 deleted devices
+[2026-04-03 11:10:02] Using purge_keep_days: 14
+[2026-04-03 11:10:10] Purging 7,056,691 states, 131,008 events older than 14 days
+[2026-04-03 11:17:13] ✓ Database purged and vacuumed
+[2026-04-03 11:17:13] ✓ No old backup files to remove (found 3 backups, all within 7 days)
+[2026-04-03 11:17:13] Database: 4768.8 MB → 2116.2 MB (2652.6 MB saved)
+[2026-04-03 11:17:13] Starting Home Assistant...
+[2026-04-03 11:17:23] Done!
 
 ⚠️  Suffix fix requires manual selection. Run option 5 separately.
 ```
@@ -361,18 +364,12 @@ Removes entities that reference deleted devices, config entries, or definitions.
 **Example output:**
 
 ```
-Found 5 orphaned entities:
-  - mqtt: sensor.old_temperature (Old Temperature Sensor)
-  - hue: light.deleted_bulb (Deleted Bulb)
-  - homeassistant: switch.removed_switch (Removed Switch)
-  - automation: automation.old_automation
-  - script: script.deleted_script
-
 ⚠️  This will stop Home Assistant. Continue? [y/N]: y
-[2026-02-08 12:00:00] Stopping Home Assistant...
-[2026-02-08 12:00:05] ✓ Removed 5 orphaned entities
-[2026-02-08 12:00:05] Starting Home Assistant...
-[2026-02-08 12:00:10] Done!
+[2026-04-03 11:09:40] Stopping Home Assistant...
+[2026-04-03 11:10:01] ✓ Removed 5 orphaned entities
+[2026-04-03 11:10:01] ✓ No old backup files to remove (found 3 backups, all within 7 days)
+[2026-04-03 11:10:01] Starting Home Assistant...
+[2026-04-03 11:10:11] Done!
 ```
 
 **When to use:**
@@ -402,11 +399,12 @@ Over time, these lists can grow large and are safe to clean.
 
 ```
 ⚠️  This will stop Home Assistant. Continue? [y/N]: y
-[2026-02-08 12:00:00] Stopping Home Assistant...
-[2026-02-08 12:00:05] ✓ Cleaned 15 deleted entities
-[2026-02-08 12:00:05] ✓ Cleaned 8 deleted devices
-[2026-02-08 12:00:05] Starting Home Assistant...
-[2026-02-08 12:00:10] Done!
+[2026-04-03 11:08:53] Stopping Home Assistant...
+[2026-04-03 11:09:11] ✓ Cleaned 400 deleted entities
+[2026-04-03 11:09:11] ✓ Cleaned 83 deleted devices
+[2026-04-03 11:09:11] ✓ No old backup files to remove (found 3 backups, all within 7 days)
+[2026-04-03 11:09:11] Starting Home Assistant...
+[2026-04-03 11:09:36] Done!
 ```
 
 **When to use:**
@@ -435,15 +433,17 @@ Removes old states and events from the database based on your recorder configura
 **Example output:**
 
 ```
-Using purge_keep_days: 7
+Using purge_keep_days: 14
 
 ⚠️  This will stop Home Assistant. Continue? [y/N]: y
-[2026-02-08 12:00:00] Stopping Home Assistant...
-[2026-02-08 12:00:05] Purging 139507 states, 5123 events older than 7 days
-[2026-02-08 12:00:45] ✓ Database purged and vacuumed
-[2026-02-08 12:00:45] Database: 1215.6 MB → 987.3 MB (228.3 MB saved)
-[2026-02-08 12:00:45] Starting Home Assistant...
-[2026-02-08 12:00:50] Done!
+[2026-04-03 11:09:40] Stopping Home Assistant...
+[2026-04-03 11:10:01] Using purge_keep_days: 14
+[2026-04-03 11:10:10] Purging 7,056,691 states, 131,008 events older than 14 days
+[2026-04-03 11:17:13] ✓ Database purged and vacuumed
+[2026-04-03 11:17:13] ✓ No old backup files to remove (found 3 backups, all within 7 days)
+[2026-04-03 11:17:13] Database: 4768.8 MB → 2116.2 MB (2652.6 MB saved)
+[2026-04-03 11:17:13] Starting Home Assistant...
+[2026-04-03 11:17:23] Done!
 ```
 
 **When to use:**
@@ -457,7 +457,7 @@ Using purge_keep_days: 7
 1. `configuration.yaml`:
    ```yaml
    recorder:
-     purge_keep_days: 7
+     purge_keep_days: 14
    ```
 
 2. Recorder integration options in `.storage/core.config_entries`
@@ -518,10 +518,10 @@ Will fix 2 entities:
   - light.bedroom_lamp_3 -> light.bedroom_lamp
 
 ⚠️  Fix these 2 entities? [y/N]: y
-[2026-02-08 12:00:00] Stopping Home Assistant...
-[2026-02-08 12:00:05] ✓ Fixed 2 entity suffixes
-[2026-02-08 12:00:05] Starting Home Assistant...
-[2026-02-08 12:00:10] Done!
+[2026-04-03 12:00:00] Stopping Home Assistant...
+[2026-04-03 12:00:05] ✓ Fixed 2 entity suffixes
+[2026-04-03 12:00:05] Starting Home Assistant...
+[2026-04-03 12:00:10] Done!
 ```
 
 **Selection syntax:**
@@ -554,8 +554,8 @@ Removes backup files older than 7 days.
 **What are backup files?**
 
 Every time you run options 2, 3, or 5, the script creates timestamped backups:
-- `core.entity_registry.backup.20260208_120000`
-- `core.device_registry.backup.20260208_120000`
+- `core.entity_registry.backup.20260403_110911`
+- `core.device_registry.backup.20260403_110911`
 
 These accumulate over time and can be safely deleted after 7 days.
 
@@ -721,8 +721,8 @@ If you find this script useful, please consider giving it a star!
 
 ---
 
-**Version**: 1.4.0  
-**Last Updated**: 2026-03-08  
+**Version**: 1.5.0  
+**Last Updated**: 2026-04-03  
 **Tested On**: Home Assistant 2026.3.1 (HAOS, Docker, Core)
 
 ---

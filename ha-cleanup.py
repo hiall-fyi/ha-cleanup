@@ -28,13 +28,16 @@ import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
+
+VERSION = "1.5.0"
 
 # Configure logging
 logging.basicConfig(
@@ -218,8 +221,18 @@ def save_json(path: Path, data: dict[str, Any]) -> None:
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
+        # Preserve original file permissions
+        try:
+            original_mode = path.stat().st_mode
+        except OSError:
+            original_mode = None
+
         # Atomic rename (POSIX guarantees atomicity)
         temp_path.replace(path)
+
+        # Restore permissions if we had them
+        if original_mode is not None:
+            path.chmod(original_mode)
 
         # Invalidate cache after write
         invalidate_cache(path)
@@ -273,6 +286,33 @@ def start_ha(method: str) -> bool:
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
+
+
+@contextmanager
+def ha_stopped() -> Generator[str | None, None, None]:
+    """Context manager to stop and restart HA around operations.
+
+    Yields the stop method string (or None if manual stop).
+    Ensures HA is restarted in the finally block.
+    """
+    method = stop_ha()
+    if not method:
+        log("⚠️  Could not stop HA automatically.")
+        if not confirm_action("Please stop HA manually. Continue when stopped?"):
+            msg = "HA not stopped — operation aborted"
+            raise RuntimeError(msg)
+
+    time.sleep(HA_STOP_WAIT_SECONDS)
+    try:
+        yield method
+    finally:
+        invalidate_cache()
+        log("Starting Home Assistant...")
+        if method:
+            if not start_ha(method):
+                log("⚠️  Failed to start HA. Please start manually.")
+        else:
+            log("Please start Home Assistant manually.")
 
 
 def get_recorder_purge_days() -> int:
@@ -392,7 +432,6 @@ def get_scene_ids() -> set[str]:
     return get_entity_ids("scene", SCENE_PATH, "scenes.yaml", "scenes")
 
 
-
 # ============================================================
 # Cleanup Functions
 # ============================================================
@@ -454,13 +493,16 @@ def find_orphaned_entities() -> list[tuple[str, str, str]]:
             is_orphan = True
 
         # Special handling for automation/script/scene
-        # Only mark as orphan if unique_id exists AND not found in definitions
+        # Additional check — does NOT override device/config orphan detection
         if platform == "automation":
-            is_orphan = unique_id not in automation_ids if unique_id else False
+            if unique_id and unique_id not in automation_ids:
+                is_orphan = True
         elif platform == "script":
-            is_orphan = unique_id not in script_ids if unique_id else False
+            if unique_id and unique_id not in script_ids:
+                is_orphan = True
         elif platform == "scene":
-            is_orphan = unique_id not in scene_ids if unique_id else False
+            if unique_id and unique_id not in scene_ids:
+                is_orphan = True
 
         if is_orphan:
             orphans.append((platform, entity_id, name))
@@ -486,7 +528,7 @@ def cleanup_orphaned_entities(dry_run: bool = False) -> int:
     backup_file(ENTITY_REGISTRY)
 
     orphan_eids = {o[1] for o in orphans}
-    data = load_json(ENTITY_REGISTRY)
+    data = load_json(ENTITY_REGISTRY, use_cache=False)
     original_count = len(data["data"]["entities"])
     data["data"]["entities"] = [
         e for e in data["data"]["entities"]
@@ -548,11 +590,15 @@ def purge_database(dry_run: bool = False) -> tuple[int, int]:
 
     cutoff_ts = int((datetime.now(tz=None) - timedelta(days=purge_days)).timestamp())  # noqa: DTZ005 — local time intentional
 
-    # Use context manager for proper connection handling
+    # Batch size for large deletes (avoid locking DB for too long)
+    batch_size = 100_000
+
     try:
         with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
             cur = conn.cursor()
 
+            log("Counting old records...")
             cur.execute(
                 "SELECT COUNT(*) FROM states WHERE last_updated_ts < ?",
                 (cutoff_ts,),
@@ -568,42 +614,73 @@ def purge_database(dry_run: bool = False) -> tuple[int, int]:
             if states or events:
                 action = "Would purge" if dry_run else "Purging"
                 log(
-                    f"{action} {states} states, {events} events"
+                    f"{action} {states:,} states, {events:,} events"
                     f" older than {purge_days} days",
                 )
 
                 if not dry_run:
-                    # Execute all deletes in single transaction
-                    cur.execute(
-                        "DELETE FROM states WHERE last_updated_ts < ?",
-                        (cutoff_ts,),
-                    )
-                    cur.execute(
-                        "DELETE FROM events WHERE time_fired_ts < ?",
-                        (cutoff_ts,),
-                    )
+                    # Batch delete states
+                    total_deleted = 0
+                    while True:
+                        cur.execute(
+                            "DELETE FROM states WHERE rowid IN ("
+                            "  SELECT rowid FROM states"
+                            "  WHERE last_updated_ts < ? LIMIT ?"
+                            ")",
+                            (cutoff_ts, batch_size),
+                        )
+                        deleted = cur.rowcount
+                        total_deleted += deleted
+                        conn.commit()
+                        if deleted < batch_size:
+                            break
+                        log(f"  ... deleted {total_deleted:,}/{states:,} states")
 
-                    # Clean orphaned attributes and event data in same transaction
+                    # Batch delete events
+                    total_deleted = 0
+                    while True:
+                        cur.execute(
+                            "DELETE FROM events WHERE rowid IN ("
+                            "  SELECT rowid FROM events"
+                            "  WHERE time_fired_ts < ? LIMIT ?"
+                            ")",
+                            (cutoff_ts, batch_size),
+                        )
+                        deleted = cur.rowcount
+                        total_deleted += deleted
+                        conn.commit()
+                        if deleted < batch_size:
+                            break
+                        log(f"  ... deleted {total_deleted:,}/{events:,} events")
+
+                    # Clean orphaned attributes using NOT IN with subquery
+                    log("Cleaning orphaned attributes...")
                     cur.execute("""
                         DELETE FROM state_attributes
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM states
-                            WHERE states.attributes_id = state_attributes.attributes_id
+                        WHERE attributes_id NOT IN (
+                            SELECT DISTINCT attributes_id FROM states
+                            WHERE attributes_id IS NOT NULL
                         )
                     """)
-                    cur.execute("""
-                        DELETE FROM event_data
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM events
-                            WHERE events.data_id = event_data.data_id
-                        )
-                    """)
-
-                    # Commit all changes at once
                     conn.commit()
 
-                    # Vacuum after commit
-                    conn.execute("VACUUM")
+                    log("Cleaning orphaned event data...")
+                    cur.execute("""
+                        DELETE FROM event_data
+                        WHERE data_id NOT IN (
+                            SELECT DISTINCT data_id FROM events
+                            WHERE data_id IS NOT NULL
+                        )
+                    """)
+                    conn.commit()
+
+                    # Vacuum must run outside a transaction
+                    log("Running VACUUM (this may take a while on large databases)...")
+                    vacuum_conn = sqlite3.connect(DB_PATH, isolation_level=None)
+                    try:
+                        vacuum_conn.execute("VACUUM")
+                    finally:
+                        vacuum_conn.close()
                     log("✓ Database purged and vacuumed")
             else:
                 log("✓ No old records to purge")
@@ -668,13 +745,13 @@ def scan_backup_files() -> list[BackupInfo]:
     """
     backups = []
 
-    for backup_file in STORAGE_PATH.glob("*.backup.*"):
+    for backup_path in STORAGE_PATH.glob("*.backup.*"):
         try:
             # Get file stats once (optimization: avoid multiple stat() calls)
-            file_stat = backup_file.stat()
+            file_stat = backup_path.stat()
 
             # Parse timestamp from filename using pre-compiled pattern
-            match = BACKUP_PATTERN.search(backup_file.name)
+            match = BACKUP_PATTERN.search(backup_path.name)
             if not match:
                 # Fallback to file mtime if timestamp not in filename
                 timestamp = datetime.fromtimestamp(file_stat.st_mtime, tz=None)  # noqa: DTZ006 — local time intentional
@@ -683,27 +760,27 @@ def scan_backup_files() -> list[BackupInfo]:
                 timestamp = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")  # noqa: DTZ007 — local time intentional
 
             # Determine file type
-            if "entity_registry" in backup_file.name:
+            if "entity_registry" in backup_path.name:
                 file_type = "entity_registry"
-            elif "device_registry" in backup_file.name:
+            elif "device_registry" in backup_path.name:
                 file_type = "device_registry"
             else:
                 file_type = "unknown"
 
             # Load JSON and count entities
             try:
-                data = load_json(backup_file, use_cache=False)  # Don't cache backups
+                data = load_json(backup_path, use_cache=False)  # Don't cache backups
                 entity_count = len(data.get("data", {}).get("entities", []))
             except (ValueError, KeyError):
                 # Corrupted file, skip
-                log(f"⚠️  Skipping corrupted backup: {backup_file.name}")
+                log(f"⚠️  Skipping corrupted backup: {backup_path.name}")
                 continue
 
             # Calculate file size (use cached stat)
             size_mb = file_stat.st_size / (1024 * 1024)
 
             backups.append(BackupInfo(
-                path=backup_file,
+                path=backup_path,
                 timestamp=timestamp,
                 file_type=file_type,
                 size_mb=size_mb,
@@ -711,7 +788,7 @@ def scan_backup_files() -> list[BackupInfo]:
             ))
 
         except (OSError, ValueError) as e:
-            log(f"⚠️  Error reading backup {backup_file.name}: {e}")
+            log(f"⚠️  Error reading backup {backup_path.name}: {e}")
             continue
 
     # Sort by timestamp (newest first)
@@ -912,47 +989,35 @@ def selective_restore_entities(backup_info: BackupInfo, dry_run: bool = False) -
         print("Aborted.")
         return 0
 
-    # Stop HA
+    # Stop HA, perform restore, restart HA
     log("Stopping Home Assistant...")
-    method = stop_ha()
-    if not method:
-        log("⚠️  Could not stop HA automatically.")
-        if not confirm_action("Please stop HA manually. Continue when stopped?"):
-            return 0
-
-    time.sleep(HA_STOP_WAIT_SECONDS)
-
     try:
-        # Backup current registry
-        backup_file(ENTITY_REGISTRY)
+        with ha_stopped():
+            # Backup current registry
+            backup_file(ENTITY_REGISTRY)
 
-        # Merge selected entities into current registry
-        current_entity_ids = {e["entity_id"] for e in current_data["data"]["entities"]}
-        restored_count = 0
+            # Merge selected entities into current registry
+            current_entity_ids = {
+                e["entity_id"] for e in current_data["data"]["entities"]
+            }
+            restored_count = 0
 
-        for entity in selected_entities:
-            entity_id = entity.get("entity_id")
-            if entity_id in current_entity_ids:
-                log(f"⚠️  Skipping {entity_id} (already exists)")
-                continue
+            for entity in selected_entities:
+                entity_id = entity.get("entity_id")
+                if entity_id in current_entity_ids:
+                    log(f"⚠️  Skipping {entity_id} (already exists)")
+                    continue
 
-            current_data["data"]["entities"].append(entity)
-            restored_count += 1
+                current_data["data"]["entities"].append(entity)
+                restored_count += 1
 
-        # Save registry
-        save_json(ENTITY_REGISTRY, current_data)
-        log(f"✓ Restored {restored_count} entities")
+            # Save registry
+            save_json(ENTITY_REGISTRY, current_data)
+            log(f"✓ Restored {restored_count} entities")
 
-        return restored_count
-
-    finally:
-        # Start HA
-        log("Starting Home Assistant...")
-        if method:
-            if not start_ha(method):
-                log("⚠️  Failed to start HA. Please start manually.")
-        else:
-            log("Please start Home Assistant manually.")
+            return restored_count
+    except RuntimeError:
+        return 0
 
 
 def full_restore_registry(backup_info: BackupInfo, dry_run: bool = False) -> int:
@@ -1011,32 +1076,18 @@ def full_restore_registry(backup_info: BackupInfo, dry_run: bool = False) -> int
 
     # Stop HA
     log("Stopping Home Assistant...")
-    method = stop_ha()
-    if not method:
-        log("⚠️  Could not stop HA automatically.")
-        if not confirm_action("Please stop HA manually. Continue when stopped?"):
-            return 0
-
-    time.sleep(HA_STOP_WAIT_SECONDS)
-
     try:
-        # Backup current registry
-        backup_file(ENTITY_REGISTRY)
+        with ha_stopped():
+            # Backup current registry
+            backup_file(ENTITY_REGISTRY)
 
-        # Copy backup file to registry path
-        shutil.copy2(backup_info.path, ENTITY_REGISTRY)
-        log(f"✓ Restored {backup_entity_count} entities from backup")
+            # Copy backup file to registry path
+            shutil.copy2(backup_info.path, ENTITY_REGISTRY)
+            log(f"✓ Restored {backup_entity_count} entities from backup")
 
-        return backup_entity_count
-
-    finally:
-        # Start HA
-        log("Starting Home Assistant...")
-        if method:
-            if not start_ha(method):
-                log("⚠️  Failed to start HA. Please start manually.")
-        else:
-            log("Please start Home Assistant manually.")
+            return backup_entity_count
+    except RuntimeError:
+        return 0
 
 
 def _print_backup_list(backups: list[BackupInfo]) -> None:
@@ -1049,6 +1100,25 @@ def _print_backup_list(backups: list[BackupInfo]) -> None:
             f" ({backup.entity_count} entities)",
         )
     print()
+
+
+def _select_backup(backups: list[BackupInfo]) -> BackupInfo | None:
+    """Prompt user to select a backup from list.
+
+    Returns selected BackupInfo or None if cancelled/invalid.
+    """
+    _print_backup_list(backups)
+    try:
+        selection = input("Select backup number (or Enter to cancel): ").strip()
+        if not selection:
+            return None
+        idx = int(selection) - 1
+        if 0 <= idx < len(backups):
+            return backups[idx]
+    except (ValueError, EOFError, KeyboardInterrupt):
+        pass
+    print("Invalid selection")
+    return None
 
 
 def restore_menu() -> None:
@@ -1121,21 +1191,9 @@ def restore_menu() -> None:
                 log("No backup files found")
                 continue
 
-            # Show list
-            _print_backup_list(cached_backups)
-
-            try:
-                selection = input("Select backup number (or Enter to cancel): ").strip()
-                if not selection:
-                    continue
-
-                idx = int(selection) - 1
-                if 0 <= idx < len(cached_backups):
-                    preview_backup_diff(cached_backups[idx])
-                else:
-                    print("Invalid selection")
-            except (ValueError, EOFError, KeyboardInterrupt):
-                print("Invalid selection")
+            selected = _select_backup(cached_backups)
+            if selected:
+                preview_backup_diff(selected)
 
         elif choice == "3":
             # Selective restore entities
@@ -1146,24 +1204,11 @@ def restore_menu() -> None:
                 log("No backup files found")
                 continue
 
-            # Show list
-            _print_backup_list(cached_backups)
-
-            try:
-                selection = input("Select backup number (or Enter to cancel): ").strip()
-                if not selection:
-                    continue
-
-                idx = int(selection) - 1
-                if 0 <= idx < len(cached_backups):
-                    selective_restore_entities(cached_backups[idx])
-                    # Invalidate cache after restore
-                    cached_backups = None
-                    invalidate_cache()
-                else:
-                    print("Invalid selection")
-            except (ValueError, EOFError, KeyboardInterrupt):
-                print("Invalid selection")
+            selected = _select_backup(cached_backups)
+            if selected:
+                selective_restore_entities(selected)
+                cached_backups = None
+                invalidate_cache()
 
         elif choice == "4":
             # Full restore registry
@@ -1174,33 +1219,14 @@ def restore_menu() -> None:
                 log("No backup files found")
                 continue
 
-            # Show list
-            _print_backup_list(cached_backups)
-
-            try:
-                selection = input("Select backup number (or Enter to cancel): ").strip()
-                if not selection:
-                    continue
-
-                idx = int(selection) - 1
-                if 0 <= idx < len(cached_backups):
-                    full_restore_registry(cached_backups[idx])
-                    # Invalidate cache after restore
-                    cached_backups = None
-                    invalidate_cache()
-                else:
-                    print("Invalid selection")
-            except (ValueError, EOFError, KeyboardInterrupt):
-                print("Invalid selection")
+            selected = _select_backup(cached_backups)
+            if selected:
+                full_restore_registry(selected)
+                cached_backups = None
+                invalidate_cache()
 
         else:
             print("Invalid option, try again.")
-
-
-
-
-
-
 
 
 def find_suffix_entities() -> list[tuple[str, str, str]]:
@@ -1279,9 +1305,10 @@ def parse_selection(selection: str, max_num: int) -> set[int]:
             # Range: "1-5"
             try:
                 range_parts = part.split("-", 1)
-                range_start = int(range_parts[0])
-                range_end = int(range_parts[1])
-                indices.update(range(range_start, range_end + 1))
+                range_start = max(1, int(range_parts[0]))
+                range_end = min(max_num, int(range_parts[1]))
+                if range_start <= range_end:
+                    indices.update(range(range_start, range_end + 1))
             except ValueError:
                 pass
         else:
@@ -1293,7 +1320,6 @@ def parse_selection(selection: str, max_num: int) -> set[int]:
             except ValueError:
                 pass
 
-    # Filter out invalid indices
     return {i for i in indices if 1 <= i <= max_num}
 
 
@@ -1371,7 +1397,6 @@ def fix_entity_suffix(dry_run: bool = False) -> int:
     return len(selected_fixes)
 
 
-
 # ============================================================
 # Menu System
 # ============================================================
@@ -1379,7 +1404,7 @@ def fix_entity_suffix(dry_run: bool = False) -> int:
 def print_menu() -> None:
     """Print interactive menu."""
     print("\n" + "=" * 70)
-    print("  Home Assistant Cleanup Tool")
+    print(f"  Home Assistant Cleanup Tool  v{VERSION}")
     print("=" * 70)
     print(f"  Config: {CONFIG_PATH}")
     db_size = get_db_size()
@@ -1423,46 +1448,29 @@ def run_with_ha_restart(
         print("Aborted.")
         return
 
-    log("Stopping Home Assistant...")
-    method = stop_ha()
-    if not method:
-        log("⚠️  Could not stop HA automatically.")
-        if not confirm_action("Please stop HA manually. Continue when stopped?"):
-            return
-
-    # Wait for HA to fully stop
-    time.sleep(HA_STOP_WAIT_SECONDS)
-
     db_before = get_db_size()
 
+    log("Stopping Home Assistant...")
     try:
-        for op in operations:
-            try:
-                op(dry_run=False)
-            except (OSError, ValueError, sqlite3.Error) as e:
-                log(f"⚠️  Error in {op.__name__}: {e}")
+        with ha_stopped():
+            for op in operations:
+                try:
+                    op(dry_run=False)
+                except (OSError, ValueError, sqlite3.Error) as e:
+                    log(f"⚠️  Error in {op.__name__}: {e}")
 
-        cleanup_old_backups()
+            cleanup_old_backups()
 
-        db_after = get_db_size()
-        if db_before and db_after:
-            saved = db_before - db_after
-            if saved > 0:
-                log(
-                    f"Database: {db_before:.1f} MB → "
-                    f"{db_after:.1f} MB ({saved:.1f} MB saved)",
-                )
-
-    finally:
-        # Invalidate cache after operations
-        invalidate_cache()
-
-        log("Starting Home Assistant...")
-        if method:
-            if not start_ha(method):
-                log("⚠️  Failed to start HA automatically. Please start manually.")
-        else:
-            log("Please start Home Assistant manually.")
+            db_after = get_db_size()
+            if db_before and db_after:
+                saved = db_before - db_after
+                if saved > 0:
+                    log(
+                        f"Database: {db_before:.1f} MB → "
+                        f"{db_after:.1f} MB ({saved:.1f} MB saved)",
+                    )
+    except RuntimeError:
+        return
 
     log("Done!")
 
@@ -1514,27 +1522,11 @@ def interactive_menu() -> None:
                 continue
 
             log("Stopping Home Assistant...")
-            method = stop_ha()
-            if not method:
-                log("⚠️  Could not stop HA automatically.")
-                if not confirm_action(
-                    "Please stop HA manually. Continue when stopped?",
-                ):
-                    continue
-            time.sleep(HA_STOP_WAIT_SECONDS)
-
             try:
-                fix_entity_suffix(dry_run=False)
-            finally:
-                # Invalidate cache after suffix fix
-                invalidate_cache()
-
-                log("Starting Home Assistant...")
-                if method:
-                    if not start_ha(method):
-                        log("⚠️  Failed to start HA. Please start manually.")
-                else:
-                    log("Please start Home Assistant manually.")
+                with ha_stopped():
+                    fix_entity_suffix(dry_run=False)
+            except RuntimeError:
+                continue
             log("Done!")
         elif choice == "6":
             cleanup_old_backups()
@@ -1572,12 +1564,6 @@ def main() -> None:
         log("=" * 50)
     else:
         interactive_menu()
-
-
-
-
-
-
 
 
 if __name__ == "__main__":
