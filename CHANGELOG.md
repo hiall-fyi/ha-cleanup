@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.6.0] — 2026-05-09
+
+**Database purge performance + reliability release**
+
+### Features
+
+- **Dramatically faster orphan cleanup on large databases** — A 500MB+ database that previously hung for 10+ minutes now completes in under a minute. Switched to a `LEFT JOIN` pattern that SQLite can optimize properly.
+- **Progress feedback throughout the entire purge** — Every phase (counting, deleting states, deleting events, cleaning orphans, VACUUM) now shows elapsed time and batch progress, so you always know the script is still working. The final partial batch is now logged too — no more silent gap at the end.
+- **Smart VACUUM with disk space check** — VACUUM now checks if you have enough free disk space before starting. If space is tight, it warns you and skips instead of potentially failing mid-way.
+- **Adaptive batch sizing** — Batch size now adjusts to how many rows need deleting. Small databases finish faster with fewer batches, large databases use bigger batches for efficiency.
+- **SQLite tuning during purge** — The script temporarily bumps cache size, uses memory-backed temp storage, and enables memory-mapped I/O for faster deletes. Settings are restored when the purge completes.
+- **Menu disclaimer for new users** — The interactive menu shows a reminder to back up first and sets expectations about purge duration on large databases.
+- **Dry run preview now includes old backup files** — Both the `d` menu option and `--dry-run` CLI now report how many old backup files would be cleaned, matching what the real run does.
+
+### Bug Fixes
+
+- **Fixed suffix fix corrupting the registry when two entities share the same base name** — Previously, if both `sensor.x_2` and `sensor.x_3` existed with no base `sensor.x`, selecting both would rewrite them to identical IDs and break the registry. The script now detects these collisions and excludes them from the candidate list automatically.
+- **Fixed selective restore silently clobbering Home Assistant's concurrent writes** — The restore flow loaded the registry before you picked entities, then wrote it back after stopping HA. If HA added or renamed an entity while you were reviewing the preview, that change was silently lost. The registry is now re-read after HA stops.
+- **Fixed device registry backups showing 0 entities in the restore list** — The backup scanner was reading the wrong key for device registry files, so they always looked empty. Each backup type is now counted correctly.
+- **Fixed `purge_keep_days` being picked up from the wrong section** — The YAML parser was unbounded and could grab a `purge_keep_days` value from a completely unrelated section below `recorder:`. Replaced with a proper indent-aware parser that stays inside the recorder block.
+- **Fixed backups overwriting each other when created in the same second** — Two operations running back-to-back would produce timestamped backups with the same filename, and the second would silently replace the first. The script now appends `_1`, `_2`, etc. to avoid collisions.
+
+### Improvements
+
+- **Selection parser now flags invalid input** — Typing `1,foo,3` or `5-1` no longer silently drops the bad parts; you see a warning listing what was ignored.
+- **Full restore now invalidates the registry cache immediately** — Prevents any chance of reading stale data right after a restore.
+- **Cleaner internal structure** — Several long functions (interactive menu, restore menu, orphan detection, restore flow) were split into smaller helpers. No behaviour changes — the script is just easier to follow for future contributors.
+
+---
+
 ## [1.5.0] — 2026-04-03
 
 **Reliability & code quality release**

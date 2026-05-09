@@ -18,6 +18,7 @@ Usage:
 """
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import logging
@@ -32,12 +33,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 
 # Configure logging
 logging.basicConfig(
@@ -89,10 +90,25 @@ BACKUP_RETENTION_DAYS = 7
 ENTITY_COUNT_DIFF_WARNING_THRESHOLD = 50  # Warn if backup differs by >50%
 HA_STOP_WAIT_SECONDS = 5
 
+# Database purge — adaptive batch sizes
+BATCH_SIZE_SMALL = 10_000      # < 100K rows
+BATCH_SIZE_MEDIUM = 50_000     # 100K - 1M rows
+BATCH_SIZE_LARGE = 100_000     # > 1M rows
+BATCH_THRESHOLD_MEDIUM = 100_000    # rows — switch from SMALL to MEDIUM
+BATCH_THRESHOLD_LARGE = 1_000_000   # rows — switch from MEDIUM to LARGE
+
+# Database purge — SQLite PRAGMA optimization
+PRAGMA_CACHE_SIZE = -64_000       # 64 MB cache (negative = KiB)
+PRAGMA_MMAP_SIZE = 268_435_456    # 256 MB memory-mapped I/O
+
+# Database purge — VACUUM
+VACUUM_SPACE_SAFETY_MARGIN = 1.1          # 10% safety margin
+VACUUM_SPEED_ESTIMATE_MB_PER_SEC = 100.0  # rough SSD estimate for ETA
+
 # Regex patterns (compiled at module level for performance)
 NUMERIC_SUFFIX_PATTERN = re.compile(r"_(\d+)$")
 YAML_ID_PATTERN = re.compile(r'(?:^|\n)\s*-?\s*id:\s*["\']?([^"\'\n\r]+)["\']?')
-BACKUP_PATTERN = re.compile(r"\.backup\.(\d{8}_\d{6})$")
+BACKUP_PATTERN = re.compile(r"\.backup\.(\d{8}_\d{6})(?:_\d+)?$")
 DUPLICATE_SUFFIX_PATTERN = re.compile(r"_([2-9]|\d{2,})$")
 
 
@@ -118,6 +134,20 @@ class EntityDiff:
     deleted: list[dict[str, Any]]      # In backup but not in current
     new: list[dict[str, Any]]          # In current but not in backup
     modified: list[tuple[dict[str, Any], dict[str, Any]]]  # (backup, current)
+
+
+class _DbCtx(NamedTuple):
+    """Grouped SQLite connection + cursor for DB purge helpers."""
+
+    cur: sqlite3.Cursor
+    conn: sqlite3.Connection
+
+
+class _TableRef(NamedTuple):
+    """Reference to a (table, column) pair in the DB."""
+
+    table: str
+    column: str
 
 
 # ============================================================
@@ -174,7 +204,13 @@ def backup_file(path: Path) -> Path:
     if not path.exists():
         msg = f"Cannot backup non-existent file: {path}"
         raise FileNotFoundError(msg)
-    backup = Path(f"{path}.backup.{datetime.now(tz=None).strftime('%Y%m%d_%H%M%S')}")  # noqa: DTZ005 — local time intentional
+    stamp = datetime.now(tz=None).strftime("%Y%m%d_%H%M%S")  # noqa: DTZ005 — local time intentional
+    backup = Path(f"{path}.backup.{stamp}")
+    # Guard against sub-second collisions when backups fire back-to-back
+    counter = 1
+    while backup.exists():
+        backup = Path(f"{path}.backup.{stamp}_{counter}")
+        counter += 1
     shutil.copy2(path, backup)
     return backup
 
@@ -252,6 +288,23 @@ def get_db_size() -> float:
     return 0.0
 
 
+def _run_ha_command(cmd: list[str]) -> bool:
+    """Run an HA lifecycle command. Returns True on success.
+
+    The cmd list is always a hardcoded literal from stop_ha/start_ha —
+    no user input ever reaches subprocess.
+    """
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=60)  # noqa: S603 — cmd is hardcoded
+    except (
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+    ):
+        return False
+    return True
+
+
 def stop_ha() -> str | None:
     """Stop Home Assistant using available method."""
     methods = [
@@ -260,15 +313,8 @@ def stop_ha() -> str | None:
         (["docker", "stop", "homeassistant"], "docker"),
     ]
     for cmd, method in methods:
-        try:
-            subprocess.run(cmd, check=True, capture_output=True, timeout=60)
+        if _run_ha_command(cmd):
             return method
-        except (
-            subprocess.CalledProcessError,
-            FileNotFoundError,
-            subprocess.TimeoutExpired,
-        ):
-            continue
     return None
 
 
@@ -281,15 +327,11 @@ def start_ha(method: str) -> bool:
     }
     if method not in cmds:
         return False
-    try:
-        subprocess.run(cmds[method], check=True, capture_output=True, timeout=60)
-        return True
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return False
+    return _run_ha_command(cmds[method])
 
 
 @contextmanager
-def ha_stopped() -> Generator[str | None, None, None]:
+def ha_stopped() -> Generator[str | None]:
     """Context manager to stop and restart HA around operations.
 
     Yields the stop method string (or None if manual stop).
@@ -315,6 +357,40 @@ def ha_stopped() -> Generator[str | None, None, None]:
             log("Please start Home Assistant manually.")
 
 
+def _extract_purge_keep_days(yaml_content: str) -> int | None:
+    """Parse `recorder: ... purge_keep_days: N` from YAML, respecting indentation.
+
+    Matches only keys inside the recorder block (indented deeper than
+    `recorder:` itself, stopping at the next top-level key).
+    """
+    lines = yaml_content.splitlines()
+    in_recorder = False
+    recorder_indent = -1
+
+    for line in lines:
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        indent = len(line) - len(stripped)
+
+        if not in_recorder:
+            if stripped.startswith("recorder:") and indent == 0:
+                in_recorder = True
+                recorder_indent = 0
+            continue
+
+        # Inside recorder — exit when we hit another top-level key
+        if indent <= recorder_indent:
+            break
+
+        match = re.match(r"purge_keep_days:\s*(\d+)", stripped)
+        if match:
+            return int(match.group(1))
+
+    return None
+
+
 def get_recorder_purge_days() -> int:
     """Get purge_keep_days from HA recorder config, fallback to default."""
     # Try configuration.yaml first
@@ -322,16 +398,10 @@ def get_recorder_purge_days() -> int:
     if config_yaml.exists():
         try:
             content = config_yaml.read_text(encoding="utf-8")
-            # Simple regex to find purge_keep_days in recorder section
-            # This handles most common YAML formats
-            match = re.search(
-                r"recorder:\s*\n(?:.*\n)*?\s+purge_keep_days:\s*(\d+)",
-                content,
-                re.MULTILINE,
-            )
-            if match:
-                return int(match.group(1))
-        except (OSError, ValueError):
+            days = _extract_purge_keep_days(content)
+            if days is not None:
+                return days
+        except OSError:
             pass
 
     # Try .storage/core.config_entries for recorder integration
@@ -436,21 +506,45 @@ def get_scene_ids() -> set[str]:
 # Cleanup Functions
 # ============================================================
 
+def _is_entity_orphan(
+    entity: dict[str, Any],
+    devices: set[str],
+    config_entries: set[str],
+    definition_ids: dict[str, set[str]],
+) -> bool:
+    """Check if a single entity dict is orphaned.
+
+    definition_ids maps platform ("automation"/"script"/"scene") to the set
+    of valid IDs for that platform.
+    """
+    device_id = entity.get("device_id")
+    if device_id and device_id not in devices:
+        return True
+
+    config_entry_id = entity.get("config_entry_id")
+    if config_entry_id and config_entry_id not in config_entries:
+        return True
+
+    platform = entity.get("platform", "")
+    unique_id = entity.get("unique_id")
+    valid_ids = definition_ids.get(platform)
+    return bool(valid_ids is not None and unique_id and unique_id not in valid_ids)
+
+
 def find_orphaned_entities() -> list[tuple[str, str, str]]:
     """Find entities with missing device, config_entry, or definition.
 
     Returns list of tuples: (platform, entity_id, name)
     """
     # Check required files exist
-    if not ENTITY_REGISTRY.exists():
-        log("⚠️  Entity registry not found, skipping orphan detection")
-        return []
-    if not DEVICE_REGISTRY.exists():
-        log("⚠️  Device registry not found, skipping orphan detection")
-        return []
-    if not CONFIG_ENTRIES.exists():
-        log("⚠️  Config entries not found, skipping orphan detection")
-        return []
+    for registry, label in (
+        (ENTITY_REGISTRY, "Entity registry"),
+        (DEVICE_REGISTRY, "Device registry"),
+        (CONFIG_ENTRIES, "Config entries"),
+    ):
+        if not registry.exists():
+            log(f"⚠️  {label} not found, skipping orphan detection")
+            return []
 
     try:
         entity_data = load_json(ENTITY_REGISTRY)
@@ -460,54 +554,27 @@ def find_orphaned_entities() -> list[tuple[str, str, str]]:
         log(f"⚠️  Error loading registry files: {e}")
         return []
 
-    # Build lookup sets (use set comprehension for better performance)
     devices = {
         d["id"] for d in device_data.get("data", {}).get("devices", [])
     }
     config_entries = {
         e["entry_id"] for e in config_data.get("data", {}).get("entries", [])
     }
+    definition_ids = {
+        "automation": get_automation_ids(),
+        "script": get_script_ids(),
+        "scene": get_scene_ids(),
+    }
 
-    # Get IDs for automation, script, scene
-    automation_ids = get_automation_ids()
-    script_ids = get_script_ids()
-    scene_ids = get_scene_ids()
-
-    orphans = []
-    for entity in entity_data.get("data", {}).get("entities", []):
-        platform = entity.get("platform", "")
-        entity_id = entity.get("entity_id", "")
-        device_id = entity.get("device_id")
-        config_entry_id = entity.get("config_entry_id")
-        unique_id = entity.get("unique_id")
-        name = entity.get("original_name", "")
-
-        is_orphan = False
-
-        # Check device reference
-        if device_id and device_id not in devices:
-            is_orphan = True
-
-        # Check config entry reference
-        if config_entry_id and config_entry_id not in config_entries:
-            is_orphan = True
-
-        # Special handling for automation/script/scene
-        # Additional check — does NOT override device/config orphan detection
-        if platform == "automation":
-            if unique_id and unique_id not in automation_ids:
-                is_orphan = True
-        elif platform == "script":
-            if unique_id and unique_id not in script_ids:
-                is_orphan = True
-        elif platform == "scene":
-            if unique_id and unique_id not in scene_ids:
-                is_orphan = True
-
-        if is_orphan:
-            orphans.append((platform, entity_id, name))
-
-    return orphans
+    return [
+        (
+            entity.get("platform", ""),
+            entity.get("entity_id", ""),
+            entity.get("original_name", ""),
+        )
+        for entity in entity_data.get("data", {}).get("entities", [])
+        if _is_entity_orphan(entity, devices, config_entries, definition_ids)
+    ]
 
 
 def cleanup_orphaned_entities(dry_run: bool = False) -> int:
@@ -579,8 +646,305 @@ def cleanup_deleted_items(dry_run: bool = False) -> int:
     return count
 
 
+# ============================================================
+# Database Purge Helpers
+# ============================================================
+
+def _get_batch_size(total_rows: int) -> int:
+    """Get optimal batch size based on total row count.
+
+    Returns adaptive batch size:
+      - < 100K rows  -> BATCH_SIZE_SMALL  (10,000)
+      - 100K-1M rows -> BATCH_SIZE_MEDIUM (50,000)
+      - > 1M rows    -> BATCH_SIZE_LARGE  (100,000)
+    """
+    if total_rows < BATCH_THRESHOLD_MEDIUM:
+        return BATCH_SIZE_SMALL
+    if total_rows < BATCH_THRESHOLD_LARGE:
+        return BATCH_SIZE_MEDIUM
+    return BATCH_SIZE_LARGE
+
+
+def _log_phase_start(phase: str) -> float:
+    """Log phase start and return monotonic timestamp."""
+    log(f"  [{phase}] Starting...")
+    return time.monotonic()
+
+
+def _log_phase_end(phase: str, start_time: float, detail: str = "") -> None:
+    """Log phase completion with elapsed time."""
+    elapsed = time.monotonic() - start_time
+    suffix = f" — {detail}" if detail else ""
+    log(f"  [{phase}] Done in {elapsed:.1f}s{suffix}")
+
+
+def _configure_pragmas(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Set optimized PRAGMAs for purge operations.
+
+    Returns dict of original values for restoration.
+    """
+    originals: dict[str, Any] = {}
+
+    for pragma, new_value in (
+        ("cache_size", PRAGMA_CACHE_SIZE),
+        ("temp_store", "MEMORY"),
+        ("mmap_size", PRAGMA_MMAP_SIZE),
+    ):
+        row = conn.execute(f"PRAGMA {pragma}").fetchone()
+        originals[pragma] = row[0] if row else 0
+        conn.execute(f"PRAGMA {pragma} = {new_value}")
+
+    return originals
+
+
+def _restore_pragmas(
+    conn: sqlite3.Connection,
+    originals: dict[str, Any],
+) -> None:
+    """Restore PRAGMAs to original values (best-effort)."""
+    for pragma, value in originals.items():
+        with contextlib.suppress(sqlite3.Error):
+            conn.execute(f"PRAGMA {pragma} = {value}")
+
+
+def _ensure_index(
+    cur: sqlite3.Cursor,
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+) -> bool:
+    """Create a temporary index if one does not already exist on column.
+
+    Returns True if a new index was created, False if one already existed.
+    """
+    cur.execute(f"PRAGMA index_list({table})")
+    for idx_info in cur.fetchall():
+        idx_name = idx_info[1]
+        cur.execute(f"PRAGMA index_info({idx_name})")
+        cols = [row[2] for row in cur.fetchall()]
+        if column in cols:
+            return False  # Index already exists
+
+    idx_name = f"ix_tmp_{table}_{column}"
+    log(f"    Creating temporary index {idx_name}...")
+    cur.execute(
+        f"CREATE INDEX {idx_name} ON {table} ({column}) "
+        f"WHERE {column} IS NOT NULL",
+    )
+    conn.commit()
+    return True
+
+
+def _drop_temp_index(
+    cur: sqlite3.Cursor,
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+) -> None:
+    """Drop a temporary index (best-effort)."""
+    idx_name = f"ix_tmp_{table}_{column}"
+    try:
+        cur.execute(f"DROP INDEX IF EXISTS {idx_name}")
+        conn.commit()
+    except sqlite3.Error:
+        pass  # Best effort
+
+
+def _count_purgeable(
+    cur: sqlite3.Cursor,
+    cutoff_ts: int,
+) -> tuple[int, int]:
+    """Count purgeable states and events older than cutoff."""
+    cur.execute(
+        "SELECT COUNT(*) FROM states WHERE last_updated_ts < ?",
+        (cutoff_ts,),
+    )
+    states: int = cur.fetchone()[0]
+
+    cur.execute(
+        "SELECT COUNT(*) FROM events WHERE time_fired_ts < ?",
+        (cutoff_ts,),
+    )
+    events: int = cur.fetchone()[0]
+
+    return (states, events)
+
+
+def _batch_delete_table(
+    db: _DbCtx,
+    target: _TableRef,
+    cutoff_ts: int,
+    total: int,
+    batch_size: int,
+) -> int:
+    """Batch delete rows older than cutoff from a table.
+
+    Returns total deleted count.
+    """
+    total_deleted = 0
+    batch_num = 0
+    total_batches = (total + batch_size - 1) // batch_size  # ceil division
+
+    while True:
+        batch_num += 1
+        db.cur.execute(
+            f"DELETE FROM {target.table} WHERE rowid IN ("
+            f"  SELECT rowid FROM {target.table}"
+            f"  WHERE {target.column} < ? LIMIT ?"
+            ")",
+            (cutoff_ts, batch_size),
+        )
+        deleted = db.cur.rowcount
+        total_deleted += deleted
+        db.conn.commit()
+
+        pct = total_deleted * 100 // total if total else 0
+        log(
+            f"    Batch {batch_num}/{total_batches}: "
+            f"deleted {total_deleted:,}/{total:,} ({pct}%)",
+        )
+
+        if deleted < batch_size:
+            break
+
+    return total_deleted
+
+
+def _cleanup_orphans(
+    db: _DbCtx,
+    orphan: _TableRef,
+    ref: _TableRef,
+) -> int:
+    """Clean orphaned rows using LEFT JOIN pattern with batch delete.
+
+    Replaces the slow NOT IN subquery with LEFT JOIN ... IS NULL.
+    Returns total deleted count.
+    """
+    created_index = False
+    with contextlib.suppress(sqlite3.Error):
+        created_index = _ensure_index(db.cur, db.conn, ref.table, ref.column)
+
+    try:
+        # Count orphans first
+        log("    Counting orphans...")
+        db.cur.execute(
+            f"SELECT COUNT(*) FROM {orphan.table} ot "
+            f"LEFT JOIN {ref.table} rt ON ot.{orphan.column} = rt.{ref.column} "
+            f"WHERE rt.{ref.column} IS NULL",
+        )
+        orphan_count: int = db.cur.fetchone()[0]
+
+        if orphan_count == 0:
+            log("    No orphan rows found")
+            return 0
+
+        log(f"    Found {orphan_count:,} orphan rows")
+        batch_size = _get_batch_size(orphan_count)
+        total_deleted = 0
+        batch_num = 0
+        total_batches = (orphan_count + batch_size - 1) // batch_size
+
+        while True:
+            batch_num += 1
+            db.cur.execute(
+                f"DELETE FROM {orphan.table} WHERE {orphan.column} IN ("
+                f"  SELECT ot.{orphan.column} FROM {orphan.table} ot"
+                f"  LEFT JOIN {ref.table} rt"
+                f"    ON ot.{orphan.column} = rt.{ref.column}"
+                f"  WHERE rt.{ref.column} IS NULL"
+                f"  LIMIT ?"
+                ")",
+                (batch_size,),
+            )
+            deleted = db.cur.rowcount
+            total_deleted += deleted
+            db.conn.commit()
+
+            if deleted < batch_size:
+                break
+
+            pct = total_deleted * 100 // orphan_count if orphan_count else 0
+            log(
+                f"    Batch {batch_num}/{total_batches}: "
+                f"deleted {total_deleted:,}/{orphan_count:,} ({pct}%)",
+            )
+
+        return total_deleted
+
+    finally:
+        if created_index:
+            _drop_temp_index(db.cur, db.conn, ref.table, ref.column)
+
+
+def _check_vacuum_feasibility() -> tuple[bool, float, float]:
+    """Check if VACUUM is feasible based on available disk space.
+
+    Returns (feasible, db_size_mb, free_space_mb).
+    """
+    db_size_mb = get_db_size()
+    if db_size_mb == 0:
+        return (False, 0.0, 0.0)
+
+    stat = os.statvfs(DB_PATH)
+    free_space_mb = (stat.f_bavail * stat.f_frsize) / (1024 * 1024)
+
+    # VACUUM needs approximately 1x DB size of free space + safety margin
+    needed_mb = db_size_mb * VACUUM_SPACE_SAFETY_MARGIN
+    feasible = free_space_mb >= needed_mb
+
+    return (feasible, db_size_mb, free_space_mb)
+
+
+def _maybe_vacuum(dry_run: bool = False) -> None:
+    """Run VACUUM if feasible, with disk space check and progress logging."""
+    feasible, db_size_mb, free_space_mb = _check_vacuum_feasibility()
+
+    if not feasible:
+        if db_size_mb > 0:
+            log(
+                f"⚠️  Skipping VACUUM — not enough disk space "
+                f"(DB: {db_size_mb:.1f} MB, free: {free_space_mb:.1f} MB, "
+                f"need: {db_size_mb * VACUUM_SPACE_SAFETY_MARGIN:.1f} MB)",
+            )
+        return
+
+    if dry_run:
+        eta = db_size_mb / VACUUM_SPEED_ESTIMATE_MB_PER_SEC
+        log(
+            f"Would VACUUM (DB: {db_size_mb:.1f} MB, "
+            f"free: {free_space_mb:.1f} MB, est. {eta:.0f}s)",
+        )
+        return
+
+    t = _log_phase_start("VACUUM")
+    log(f"    DB size before: {db_size_mb:.1f} MB")
+
+    vacuum_conn = sqlite3.connect(DB_PATH, isolation_level=None)
+    try:
+        vacuum_conn.execute("VACUUM")
+    finally:
+        vacuum_conn.close()
+
+    after_mb = get_db_size()
+    saved = db_size_mb - after_mb
+    _log_phase_end(
+        "VACUUM",
+        t,
+        f"DB: {db_size_mb:.1f} → {after_mb:.1f} MB ({saved:.1f} MB saved)",
+    )
+
+
 def purge_database(dry_run: bool = False) -> tuple[int, int]:
-    """Purge old database records and vacuum."""
+    """Purge old database records and vacuum.
+
+    Phases:
+      1. Count purgeable states/events
+      2. Batch delete states
+      3. Batch delete events
+      4. Clean orphaned state_attributes (LEFT JOIN)
+      5. Clean orphaned event_data (LEFT JOIN)
+      6. VACUUM (with disk space check)
+    """
     if not DB_PATH.exists():
         log("✓ No database found, skipping")
         return (0, 0)
@@ -590,117 +954,105 @@ def purge_database(dry_run: bool = False) -> tuple[int, int]:
 
     cutoff_ts = int((datetime.now(tz=None) - timedelta(days=purge_days)).timestamp())  # noqa: DTZ005 — local time intentional
 
-    # Batch size for large deletes (avoid locking DB for too long)
-    batch_size = 100_000
-
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
-            cur = conn.cursor()
+            originals = _configure_pragmas(conn)
+            try:
+                cur = conn.cursor()
 
-            log("Counting old records...")
-            cur.execute(
-                "SELECT COUNT(*) FROM states WHERE last_updated_ts < ?",
-                (cutoff_ts,),
-            )
-            states = cur.fetchone()[0]
+                # Phase 1: Count
+                t = _log_phase_start("Count")
+                states, events = _count_purgeable(cur, cutoff_ts)
+                _log_phase_end(
+                    "Count", t, f"{states:,} states, {events:,} events",
+                )
 
-            cur.execute(
-                "SELECT COUNT(*) FROM events WHERE time_fired_ts < ?",
-                (cutoff_ts,),
-            )
-            events = cur.fetchone()[0]
+                if not (states or events):
+                    log("✓ No old records to purge")
+                    return (0, 0)
 
-            if states or events:
-                action = "Would purge" if dry_run else "Purging"
+                if dry_run:
+                    log(
+                        f"Would purge {states:,} states, {events:,} events"
+                        f" older than {purge_days} days",
+                    )
+                    _maybe_vacuum(dry_run=True)
+                    return (states, events)
+
                 log(
-                    f"{action} {states:,} states, {events:,} events"
+                    f"Purging {states:,} states, {events:,} events"
                     f" older than {purge_days} days",
                 )
 
-                if not dry_run:
-                    # Batch delete states
-                    total_deleted = 0
-                    while True:
-                        cur.execute(
-                            "DELETE FROM states WHERE rowid IN ("
-                            "  SELECT rowid FROM states"
-                            "  WHERE last_updated_ts < ? LIMIT ?"
-                            ")",
-                            (cutoff_ts, batch_size),
-                        )
-                        deleted = cur.rowcount
-                        total_deleted += deleted
-                        conn.commit()
-                        if deleted < batch_size:
-                            break
-                        log(f"  ... deleted {total_deleted:,}/{states:,} states")
+                db = _DbCtx(cur=cur, conn=conn)
 
-                    # Batch delete events
-                    total_deleted = 0
-                    while True:
-                        cur.execute(
-                            "DELETE FROM events WHERE rowid IN ("
-                            "  SELECT rowid FROM events"
-                            "  WHERE time_fired_ts < ? LIMIT ?"
-                            ")",
-                            (cutoff_ts, batch_size),
-                        )
-                        deleted = cur.rowcount
-                        total_deleted += deleted
-                        conn.commit()
-                        if deleted < batch_size:
-                            break
-                        log(f"  ... deleted {total_deleted:,}/{events:,} events")
+                # Phase 2: Delete states
+                if states:
+                    t = _log_phase_start("States")
+                    batch_size = _get_batch_size(states)
+                    deleted = _batch_delete_table(
+                        db,
+                        _TableRef("states", "last_updated_ts"),
+                        cutoff_ts, states, batch_size,
+                    )
+                    _log_phase_end("States", t, f"deleted {deleted:,} rows")
 
-                    # Clean orphaned attributes using NOT IN with subquery
-                    log("Cleaning orphaned attributes...")
-                    cur.execute("""
-                        DELETE FROM state_attributes
-                        WHERE attributes_id NOT IN (
-                            SELECT DISTINCT attributes_id FROM states
-                            WHERE attributes_id IS NOT NULL
-                        )
-                    """)
-                    conn.commit()
+                # Phase 3: Delete events
+                if events:
+                    t = _log_phase_start("Events")
+                    batch_size = _get_batch_size(events)
+                    deleted = _batch_delete_table(
+                        db,
+                        _TableRef("events", "time_fired_ts"),
+                        cutoff_ts, events, batch_size,
+                    )
+                    _log_phase_end("Events", t, f"deleted {deleted:,} rows")
 
-                    log("Cleaning orphaned event data...")
-                    cur.execute("""
-                        DELETE FROM event_data
-                        WHERE data_id NOT IN (
-                            SELECT DISTINCT data_id FROM events
-                            WHERE data_id IS NOT NULL
-                        )
-                    """)
-                    conn.commit()
+                # Phase 4: Orphan attributes
+                t = _log_phase_start("Orphan Attributes")
+                orphan_attrs = _cleanup_orphans(
+                    db,
+                    _TableRef("state_attributes", "attributes_id"),
+                    _TableRef("states", "attributes_id"),
+                )
+                _log_phase_end(
+                    "Orphan Attributes", t,
+                    f"deleted {orphan_attrs:,} rows",
+                )
 
-                    # Vacuum must run outside a transaction
-                    log("Running VACUUM (this may take a while on large databases)...")
-                    vacuum_conn = sqlite3.connect(DB_PATH, isolation_level=None)
-                    try:
-                        vacuum_conn.execute("VACUUM")
-                    finally:
-                        vacuum_conn.close()
-                    log("✓ Database purged and vacuumed")
-            else:
-                log("✓ No old records to purge")
+                # Phase 5: Orphan event data
+                t = _log_phase_start("Orphan Event Data")
+                orphan_events = _cleanup_orphans(
+                    db,
+                    _TableRef("event_data", "data_id"),
+                    _TableRef("events", "data_id"),
+                )
+                _log_phase_end(
+                    "Orphan Event Data", t,
+                    f"deleted {orphan_events:,} rows",
+                )
 
-            return (states, events)
+            finally:
+                _restore_pragmas(conn, originals)
+
+        # Phase 6: VACUUM (outside transaction)
+        _maybe_vacuum()
 
     except sqlite3.Error as e:
         log(f"⚠️  Database error: {e}")
         return (0, 0)
+    else:
+        log("✓ Database purged")
+        return (states, events)
 
 
-def cleanup_old_backups() -> int:
+def cleanup_old_backups(dry_run: bool = False) -> int:
     """Remove backup files older than BACKUP_RETENTION_DAYS."""
     cutoff = (datetime.now(tz=None) - timedelta(days=BACKUP_RETENTION_DAYS)).timestamp()  # noqa: DTZ005 — local time intentional
-    removed = 0
 
-    # Count total backup files
     total_backups = len(list(STORAGE_PATH.glob("*.backup.*")))
 
-    # Batch collect files to remove (avoid multiple stat calls)
     files_to_remove = []
     for f in STORAGE_PATH.glob("*.backup.*"):
         try:
@@ -709,7 +1061,12 @@ def cleanup_old_backups() -> int:
         except OSError:
             pass
 
-    # Remove collected files
+    if dry_run:
+        if files_to_remove:
+            log(f"Would remove {len(files_to_remove)} old backup files")
+        return len(files_to_remove)
+
+    removed = 0
     for f in files_to_remove:
         try:
             f.unlink()
@@ -767,10 +1124,11 @@ def scan_backup_files() -> list[BackupInfo]:
             else:
                 file_type = "unknown"
 
-            # Load JSON and count entities
+            # Load JSON and count records (entities or devices depending on type)
             try:
                 data = load_json(backup_path, use_cache=False)  # Don't cache backups
-                entity_count = len(data.get("data", {}).get("entities", []))
+                record_key = "devices" if file_type == "device_registry" else "entities"
+                entity_count = len(data.get("data", {}).get(record_key, []))
             except (ValueError, KeyError):
                 # Corrupted file, skip
                 log(f"⚠️  Skipping corrupted backup: {backup_path.name}")
@@ -795,6 +1153,11 @@ def scan_backup_files() -> list[BackupInfo]:
     backups.sort(key=lambda b: b.timestamp, reverse=True)
 
     return backups
+
+
+_DIFF_ATTRS = (
+    "platform", "device_id", "config_entry_id", "original_name", "disabled_by",
+)
 
 
 def compare_registries(
@@ -824,12 +1187,6 @@ def compare_registries(
     # Find new entities (in current but not in backup)
     new = [current_entities[eid] for eid in (current_ids - backup_ids)]
 
-    # Find modified entities (compare attributes for common entity_ids)
-    # Use set of attributes to compare for faster comparison
-    attrs_to_compare = {
-        "platform", "device_id", "config_entry_id",
-        "original_name", "disabled_by",
-    }
     modified = []
     common_ids = backup_ids & current_ids
 
@@ -837,19 +1194,71 @@ def compare_registries(
         backup_entity = backup_entities[eid]
         current_entity = current_entities[eid]
 
-        # Quick comparison using any() for early exit
         if any(
             backup_entity.get(attr) != current_entity.get(attr)
-            for attr in attrs_to_compare
+            for attr in _DIFF_ATTRS
         ):
             modified.append((backup_entity, current_entity))
 
     return EntityDiff(deleted=deleted, new=new, modified=modified)
 
 
+def _print_diff_section_header(title: str, count: int) -> None:
+    print("=" * 60)
+    print(f"{title}: {count}")
+    print("=" * 60)
+
+
+def _print_deleted_entities(deleted: list[dict[str, Any]]) -> None:
+    _print_diff_section_header("DELETED ENTITIES (in backup but not in current)", len(deleted))
+    if not deleted:
+        print("  None")
+        print()
+        return
+    for i, entity in enumerate(deleted, 1):
+        entity_id = entity.get("entity_id", "unknown")
+        platform = entity.get("platform", "unknown")
+        name = entity.get("original_name", "")
+        print(f"  {i:2d}. {entity_id} ({platform})")
+        if name:
+            print(f"      Name: {name}")
+    print()
+
+
+def _print_new_entities(new_entities: list[dict[str, Any]]) -> None:
+    _print_diff_section_header("NEW ENTITIES (in current but not in backup)", len(new_entities))
+    if not new_entities:
+        print("  None")
+        print()
+        return
+    for i, entity in enumerate(new_entities, 1):
+        entity_id = entity.get("entity_id", "unknown")
+        platform = entity.get("platform", "unknown")
+        print(f"  {i:2d}. {entity_id} ({platform})")
+    print()
+
+
+def _print_modified_entities(
+    modified: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> None:
+    _print_diff_section_header("MODIFIED ENTITIES", len(modified))
+    if not modified:
+        print("  None")
+        print()
+        return
+    for i, (backup_entity, current_entity) in enumerate(modified, 1):
+        entity_id = backup_entity.get("entity_id", "unknown")
+        print(f"  {i:2d}. {entity_id}")
+        for attr in _DIFF_ATTRS:
+            backup_val = backup_entity.get(attr)
+            current_val = current_entity.get(attr)
+            if backup_val != current_val:
+                print(f"      {attr}: {backup_val} → {current_val}")
+    print()
+
+
 def preview_backup_diff(backup_info: BackupInfo) -> None:
     """Display differences between backup and current registry."""
-    # Load backup and current registry
     try:
         backup_data = load_json(backup_info.path, use_cache=False)
         current_data = load_json(ENTITY_REGISTRY)
@@ -857,92 +1266,28 @@ def preview_backup_diff(backup_info: BackupInfo) -> None:
         log(f"⚠️  Error loading registries: {e}")
         return
 
-    # Compare registries
     diff = compare_registries(backup_data, current_data)
 
-    # Display backup metadata
     print(f"\nBackup: {backup_info.path.name}")
     print(f"Timestamp: {backup_info.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Entities in backup: {backup_info.entity_count}")
     print()
 
-    # Display deleted entities
-    print("=" * 60)
-    print(f"DELETED ENTITIES (in backup but not in current): {len(diff.deleted)}")
-    print("=" * 60)
-    if diff.deleted:
-        for i, entity in enumerate(diff.deleted, 1):
-            entity_id = entity.get("entity_id", "unknown")
-            platform = entity.get("platform", "unknown")
-            name = entity.get("original_name", "")
-            print(f"  {i:2d}. {entity_id} ({platform})")
-            if name:
-                print(f"      Name: {name}")
-    else:
-        print("  None")
-    print()
-
-    # Display new entities
-    print("=" * 60)
-    print(f"NEW ENTITIES (in current but not in backup): {len(diff.new)}")
-    print("=" * 60)
-    if diff.new:
-        for i, entity in enumerate(diff.new, 1):
-            entity_id = entity.get("entity_id", "unknown")
-            platform = entity.get("platform", "unknown")
-            print(f"  {i:2d}. {entity_id} ({platform})")
-    else:
-        print("  None")
-    print()
-
-    # Display modified entities
-    print("=" * 60)
-    print(f"MODIFIED ENTITIES: {len(diff.modified)}")
-    print("=" * 60)
-    if diff.modified:
-        for i, (backup_entity, current_entity) in enumerate(diff.modified, 1):
-            entity_id = backup_entity.get("entity_id", "unknown")
-            print(f"  {i:2d}. {entity_id}")
-
-            # Show what changed (use set for faster lookup)
-            attrs = {
-                "platform", "device_id", "config_entry_id",
-                "original_name", "disabled_by",
-            }
-            for attr in attrs:
-                backup_val = backup_entity.get(attr)
-                current_val = current_entity.get(attr)
-                if backup_val != current_val:
-                    print(f"      {attr}: {backup_val} → {current_val}")
-    else:
-        print("  None")
-    print()
+    _print_deleted_entities(diff.deleted)
+    _print_new_entities(diff.new)
+    _print_modified_entities(diff.modified)
 
 
-def selective_restore_entities(backup_info: BackupInfo, dry_run: bool = False) -> int:
-    """Restore selected entities from backup.
+def _prompt_restore_selection(
+    deleted: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    """Prompt user to pick which deleted entities to restore.
 
-    Returns count of restored entities.
+    Returns list of selected entity dicts, or None if aborted/empty.
     """
-    # Load backup and current registry
-    try:
-        backup_data = load_json(backup_info.path, use_cache=False)
-        current_data = load_json(ENTITY_REGISTRY)
-    except (FileNotFoundError, ValueError) as e:
-        log(f"⚠️  Error loading registries: {e}")
-        return 0
-
-    # Compare registries to find deleted entities
-    diff = compare_registries(backup_data, current_data)
-
-    if not diff.deleted:
-        log("✓ No deleted entities to restore")
-        return 0
-
-    # Display deleted entities with numbering
-    print(f"\nFound {len(diff.deleted)} deleted entities:")
+    print(f"\nFound {len(deleted)} deleted entities:")
     print("=" * 60)
-    for i, entity in enumerate(diff.deleted, 1):
+    for i, entity in enumerate(deleted, 1):
         entity_id = entity.get("entity_id", "unknown")
         platform = entity.get("platform", "unknown")
         name = entity.get("original_name", "")
@@ -950,8 +1295,6 @@ def selective_restore_entities(backup_info: BackupInfo, dry_run: bool = False) -
         if name:
             print(f"       Name: {name}")
     print()
-
-    # Prompt user for selection
     print("Enter selection:")
     print("  - Numbers: 1,3,5 or 1-5 or 1,3-5,8")
     print("  - 'all' to restore all")
@@ -962,18 +1305,71 @@ def selective_restore_entities(backup_info: BackupInfo, dry_run: bool = False) -
         selection = input("Selection: ")
     except (EOFError, KeyboardInterrupt):
         print("\nAborted.")
-        return 0
+        return None
 
-    indices = parse_selection(selection, len(diff.deleted))
-
+    indices = parse_selection(selection, len(deleted))
     if not indices:
         log("No entities selected, skipping")
+        return None
+
+    return [deleted[i - 1] for i in sorted(indices)]
+
+
+def _apply_restore(selected_entities: list[dict[str, Any]]) -> int:
+    """Perform the actual restore with HA stopped. Returns count restored."""
+    log("Stopping Home Assistant...")
+    try:
+        with ha_stopped():
+            backup_file(ENTITY_REGISTRY)
+
+            # Re-read registry AFTER HA has stopped — the copy loaded before
+            # the user interaction may be stale (HA could have written to it
+            # while the user was reading the preview).
+            fresh_data = load_json(ENTITY_REGISTRY, use_cache=False)
+
+            current_entity_ids = {
+                e["entity_id"] for e in fresh_data["data"]["entities"]
+            }
+            restored_count = 0
+
+            for entity in selected_entities:
+                entity_id = entity.get("entity_id")
+                if entity_id in current_entity_ids:
+                    log(f"⚠️  Skipping {entity_id} (already exists)")
+                    continue
+
+                fresh_data["data"]["entities"].append(entity)
+                restored_count += 1
+
+            save_json(ENTITY_REGISTRY, fresh_data)
+            log(f"✓ Restored {restored_count} entities")
+            return restored_count
+    except (RuntimeError, FileNotFoundError, ValueError) as e:
+        log(f"⚠️  Restore failed: {e}")
         return 0
 
-    # Get selected entities
-    selected_entities = [diff.deleted[i - 1] for i in sorted(indices)]
 
-    # Display selected entities and confirm
+def selective_restore_entities(backup_info: BackupInfo, dry_run: bool = False) -> int:
+    """Restore selected entities from backup.
+
+    Returns count of restored entities.
+    """
+    try:
+        backup_data = load_json(backup_info.path, use_cache=False)
+        current_data = load_json(ENTITY_REGISTRY)
+    except (FileNotFoundError, ValueError) as e:
+        log(f"⚠️  Error loading registries: {e}")
+        return 0
+
+    diff = compare_registries(backup_data, current_data)
+    if not diff.deleted:
+        log("✓ No deleted entities to restore")
+        return 0
+
+    selected_entities = _prompt_restore_selection(diff.deleted)
+    if not selected_entities:
+        return 0
+
     print(f"\nWill restore {len(selected_entities)} entities:")
     for entity in selected_entities:
         entity_id = entity.get("entity_id", "unknown")
@@ -989,35 +1385,7 @@ def selective_restore_entities(backup_info: BackupInfo, dry_run: bool = False) -
         print("Aborted.")
         return 0
 
-    # Stop HA, perform restore, restart HA
-    log("Stopping Home Assistant...")
-    try:
-        with ha_stopped():
-            # Backup current registry
-            backup_file(ENTITY_REGISTRY)
-
-            # Merge selected entities into current registry
-            current_entity_ids = {
-                e["entity_id"] for e in current_data["data"]["entities"]
-            }
-            restored_count = 0
-
-            for entity in selected_entities:
-                entity_id = entity.get("entity_id")
-                if entity_id in current_entity_ids:
-                    log(f"⚠️  Skipping {entity_id} (already exists)")
-                    continue
-
-                current_data["data"]["entities"].append(entity)
-                restored_count += 1
-
-            # Save registry
-            save_json(ENTITY_REGISTRY, current_data)
-            log(f"✓ Restored {restored_count} entities")
-
-            return restored_count
-    except RuntimeError:
-        return 0
+    return _apply_restore(selected_entities)
 
 
 def full_restore_registry(backup_info: BackupInfo, dry_run: bool = False) -> int:
@@ -1083,6 +1451,7 @@ def full_restore_registry(backup_info: BackupInfo, dry_run: bool = False) -> int
 
             # Copy backup file to registry path
             shutil.copy2(backup_info.path, ENTITY_REGISTRY)
+            invalidate_cache(ENTITY_REGISTRY)
             log(f"✓ Restored {backup_entity_count} entities from backup")
 
             return backup_entity_count
@@ -1121,24 +1490,46 @@ def _select_backup(backups: list[BackupInfo]) -> BackupInfo | None:
     return None
 
 
+def _print_restore_menu() -> None:
+    print("\n" + "=" * 70)
+    print("  Restore from Backup")
+    print("=" * 70)
+    print()
+    print("  1. List available backups")
+    print("  2. Preview backup differences")
+    print("  3. Selective restore entities")
+    print("  4. Full restore registry")
+    print()
+    print("  r. Refresh backup list")
+    print("  b. Back to main menu")
+    print()
+
+
+def _list_backups_detailed(backups: list[BackupInfo]) -> None:
+    print(f"\nFound {len(backups)} backup files:")
+    print("=" * 60)
+    print(
+        f"{'#':<4} {'Timestamp':<20} {'Type':<18}"
+        f" {'Entities':<10} {'Size (MB)':<10}",
+    )
+    print("-" * 60)
+    for i, backup in enumerate(backups, 1):
+        timestamp_str = backup.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        print(
+            f"{i:<4} {timestamp_str:<20}"
+            f" {backup.file_type:<18}"
+            f" {backup.entity_count:<10}"
+            f" {backup.size_mb:<10.2f}",
+        )
+    print()
+
+
 def restore_menu() -> None:
     """Interactive restore menu."""
-    # Cache backups list to avoid repeated scanning
-    cached_backups = None
+    cached_backups: list[BackupInfo] | None = None
 
     while True:
-        print("\n" + "=" * 70)
-        print("  Restore from Backup")
-        print("=" * 70)
-        print()
-        print("  1. List available backups")
-        print("  2. Preview backup differences")
-        print("  3. Selective restore entities")
-        print("  4. Full restore registry")
-        print()
-        print("  r. Refresh backup list")
-        print("  b. Back to main menu")
-        print()
+        _print_restore_menu()
 
         try:
             choice = input("  Select option: ").strip().lower()
@@ -1150,83 +1541,38 @@ def restore_menu() -> None:
             break
 
         if choice == "r":
-            # Refresh backup list
             cached_backups = None
             log("✓ Backup list refreshed")
             continue
 
-        elif choice == "1":
-            # List available backups
-            if cached_backups is None:
-                cached_backups = scan_backup_files()
-
-            if not cached_backups:
-                log("No backup files found")
-                continue
-
-            print(f"\nFound {len(cached_backups)} backup files:")
-            print("=" * 60)
-            print(
-                f"{'#':<4} {'Timestamp':<20} {'Type':<18}"
-                f" {'Entities':<10} {'Size (MB)':<10}",
-            )
-            print("-" * 60)
-
-            for i, backup in enumerate(cached_backups, 1):
-                timestamp_str = backup.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-                print(
-                    f"{i:<4} {timestamp_str:<20}"
-                    f" {backup.file_type:<18}"
-                    f" {backup.entity_count:<10}"
-                    f" {backup.size_mb:<10.2f}",
-                )
-            print()
-
-        elif choice == "2":
-            # Preview backup differences
-            if cached_backups is None:
-                cached_backups = scan_backup_files()
-
-            if not cached_backups:
-                log("No backup files found")
-                continue
-
-            selected = _select_backup(cached_backups)
-            if selected:
-                preview_backup_diff(selected)
-
-        elif choice == "3":
-            # Selective restore entities
-            if cached_backups is None:
-                cached_backups = scan_backup_files()
-
-            if not cached_backups:
-                log("No backup files found")
-                continue
-
-            selected = _select_backup(cached_backups)
-            if selected:
-                selective_restore_entities(selected)
-                cached_backups = None
-                invalidate_cache()
-
-        elif choice == "4":
-            # Full restore registry
-            if cached_backups is None:
-                cached_backups = scan_backup_files()
-
-            if not cached_backups:
-                log("No backup files found")
-                continue
-
-            selected = _select_backup(cached_backups)
-            if selected:
-                full_restore_registry(selected)
-                cached_backups = None
-                invalidate_cache()
-
-        else:
+        if choice not in {"1", "2", "3", "4"}:
             print("Invalid option, try again.")
+            continue
+
+        if cached_backups is None:
+            cached_backups = scan_backup_files()
+        if not cached_backups:
+            log("No backup files found")
+            continue
+
+        if choice == "1":
+            _list_backups_detailed(cached_backups)
+            continue
+
+        selected = _select_backup(cached_backups)
+        if not selected:
+            continue
+
+        if choice == "2":
+            preview_backup_diff(selected)
+        elif choice == "3":
+            selective_restore_entities(selected)
+            cached_backups = None
+            invalidate_cache()
+        elif choice == "4":
+            full_restore_registry(selected)
+            cached_backups = None
+            invalidate_cache()
 
 
 def find_suffix_entities() -> list[tuple[str, str, str]]:
@@ -1272,7 +1618,33 @@ def find_suffix_entities() -> list[tuple[str, str, str]]:
 
         candidates.append((entity_id, new_id, platform))
 
-    return candidates
+    # Exclude candidates where multiple suffixed entities map to the same base.
+    # Renaming both would create duplicate entity_ids — registry corruption.
+    target_counts: dict[str, int] = {}
+    for _old, new_id, _platform in candidates:
+        target_counts[new_id] = target_counts.get(new_id, 0) + 1
+
+    return [c for c in candidates if target_counts[c[1]] == 1]
+
+
+def _parse_range(part: str, max_num: int) -> set[int] | None:
+    """Parse a `start-end` range. Returns None if invalid or empty."""
+    try:
+        raw_start, raw_end = (int(p) for p in part.split("-", 1))
+    except ValueError:
+        return None
+    start = max(1, raw_start)
+    end = min(max_num, raw_end)
+    return set(range(start, end + 1)) if start <= end else None
+
+
+def _parse_single(part: str, max_num: int) -> int | None:
+    """Parse a single number. Returns None if invalid or out of range."""
+    try:
+        num = int(part)
+    except ValueError:
+        return None
+    return num if 1 <= num <= max_num else None
 
 
 def parse_selection(selection: str, max_num: int) -> set[int]:
@@ -1287,7 +1659,6 @@ def parse_selection(selection: str, max_num: int) -> set[int]:
     """
     selection = selection.strip().lower()
 
-    # Early return for special cases
     if selection in ("", "none", "n", "q"):
         return set()
 
@@ -1295,32 +1666,26 @@ def parse_selection(selection: str, max_num: int) -> set[int]:
         return set(range(1, max_num + 1))
 
     indices: set[int] = set()
-    parts = selection.replace(" ", "").split(",")
+    skipped: list[str] = []
 
-    for part in parts:
-        if not part:
-            continue
-
+    for part in (p for p in selection.replace(" ", "").split(",") if p):
         if "-" in part:
-            # Range: "1-5"
-            try:
-                range_parts = part.split("-", 1)
-                range_start = max(1, int(range_parts[0]))
-                range_end = min(max_num, int(range_parts[1]))
-                if range_start <= range_end:
-                    indices.update(range(range_start, range_end + 1))
-            except ValueError:
-                pass
+            got = _parse_range(part, max_num)
+            if got is None:
+                skipped.append(part)
+            else:
+                indices.update(got)
         else:
-            # Single number
-            try:
-                num = int(part)
-                if 1 <= num <= max_num:
-                    indices.add(num)
-            except ValueError:
-                pass
+            got_num = _parse_single(part, max_num)
+            if got_num is None:
+                skipped.append(part)
+            else:
+                indices.add(got_num)
 
-    return {i for i in indices if 1 <= i <= max_num}
+    if skipped:
+        log(f"⚠️  Ignored invalid selection parts: {', '.join(skipped)}")
+
+    return indices
 
 
 def fix_entity_suffix(dry_run: bool = False) -> int:
@@ -1410,12 +1775,17 @@ def print_menu() -> None:
     db_size = get_db_size()
     if db_size:
         print(f"  Database: {db_size:.1f} MB")
+    print("-" * 70)
+    print("  ⚠️  This tool modifies HA registries and database.")
+    print("     Always back up first.")
+    print("  💡 DB purge on large DBs may take several minutes —")
+    print("     progress will be shown.")
     print("=" * 70)
     print()
-    print("  1. Full cleanup (options 2-4, 6)")
+    print("  1. Full cleanup (options 2-4, 6 — optimized)")
     print("  2. Remove orphaned entities (missing device/config/definition)")
     print("  3. Clean deleted registry items (deleted_entities/devices)")
-    print("  4. Purge old database records (auto-detect purge_keep_days)")
+    print("  4. Purge old database records (optimized batch + progress)")
     print("  5. Fix numeric suffix (_2, _3, etc.) - interactive")
     print(f"  6. Clean old backup files (>{BACKUP_RETENTION_DAYS} days)")
     print("  7. Restore from backup (selective or full)")
@@ -1475,6 +1845,37 @@ def run_with_ha_restart(
     log("Done!")
 
 
+def _run_dry_run_preview() -> None:
+    print("\n" + "=" * 70)
+    log("DRY RUN - Preview all changes")
+    print("=" * 70 + "\n")
+    cleanup_orphaned_entities(dry_run=True)
+    cleanup_deleted_items(dry_run=True)
+    purge_database(dry_run=True)
+    fix_entity_suffix(dry_run=True)
+    cleanup_old_backups(dry_run=True)
+
+
+def _run_suffix_fix() -> None:
+    """Interactive suffix fix with its own HA stop/start cycle."""
+    candidates = find_suffix_entities()
+    if not candidates:
+        log("✓ No numeric suffix entities found")
+        return
+
+    if not confirm_action("This will stop Home Assistant. Continue?"):
+        print("Aborted.")
+        return
+
+    log("Stopping Home Assistant...")
+    try:
+        with ha_stopped():
+            fix_entity_suffix(dry_run=False)
+    except RuntimeError:
+        return
+    log("Done!")
+
+
 def interactive_menu() -> None:
     """Run interactive menu loop."""
     while True:
@@ -1489,15 +1890,8 @@ def interactive_menu() -> None:
             print("Bye!")
             break
         if choice == "d":
-            print("\n" + "=" * 70)
-            log("DRY RUN - Preview all changes")
-            print("=" * 70 + "\n")
-            cleanup_orphaned_entities(dry_run=True)
-            cleanup_deleted_items(dry_run=True)
-            purge_database(dry_run=True)
-            fix_entity_suffix(dry_run=True)
+            _run_dry_run_preview()
         elif choice == "1":
-            # Full cleanup - but suffix fix is separate due to interactive nature
             run_with_ha_restart([
                 cleanup_orphaned_entities,
                 cleanup_deleted_items,
@@ -1511,23 +1905,7 @@ def interactive_menu() -> None:
         elif choice == "4":
             run_with_ha_restart([purge_database])
         elif choice == "5":
-            # Suffix fix is interactive, needs special handling
-            candidates = find_suffix_entities()
-            if not candidates:
-                log("✓ No numeric suffix entities found")
-                continue
-
-            if not confirm_action("This will stop Home Assistant. Continue?"):
-                print("Aborted.")
-                continue
-
-            log("Stopping Home Assistant...")
-            try:
-                with ha_stopped():
-                    fix_entity_suffix(dry_run=False)
-            except RuntimeError:
-                continue
-            log("Done!")
+            _run_suffix_fix()
         elif choice == "6":
             cleanup_old_backups()
         elif choice == "7":
@@ -1555,12 +1933,14 @@ def main() -> None:
         deleted = cleanup_deleted_items(dry_run=True)
         purge_database(dry_run=True)
         suffix = fix_entity_suffix(dry_run=True)
+        old_backups = cleanup_old_backups(dry_run=True)
 
         log("\n" + "=" * 50)
         log("Summary:")
         log(f"  Orphaned entities: {orphans}")
         log(f"  Deleted registry items: {deleted}")
         log(f"  Suffix fixes: {suffix}")
+        log(f"  Old backup files: {old_backups}")
         log("=" * 50)
     else:
         interactive_menu()
