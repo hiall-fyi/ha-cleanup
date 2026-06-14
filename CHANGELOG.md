@@ -4,13 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.7.0] — 2026-06-14
+
+**Restore preview & audit hardening release**
+
+### Features
+
+- **Restore menu now has a dry-run toggle** — Press `d` in the restore submenu to flip dry-run on or off. Selective Restore (option 3) and Full Restore (option 4) then preview what they'd do without touching the registry. Restore was the only feature without a preview path.
+- **Recorder `purge_keep_days` now reads from `packages/`** — Many setups use `packages: !include_dir_named packages/` to split configuration, and put `recorder:` there. The tool used to only read `configuration.yaml`, silently falling back to the 14-day default and purging more history than you asked for. It now also scans `packages/*.yaml` and tells you in the log where it found the value (`configuration.yaml`, `packages/*.yaml`, `config_entries`, or `default`).
+
+### Bug Fixes
+
+- **Fixed suffix fix silently hiding entities that collide on the same base name** — When two entities like `sensor.x_2` and `sensor.x_3` both mapped back to `sensor.x`, v1.6.0 started filtering them out to avoid registry corruption — but it did so without telling you. You'd see "No suffix entities found" and assume the registry was clean. The tool now logs a warning naming every excluded pair so you know to rename them manually.
+- **Fixed Full Restore leaving the registry in a partial state if interrupted mid-write** — Full Restore used a plain file copy, so a crash or Ctrl-C part-way through could leave `core.entity_registry` truncated and Home Assistant would fail to start. It now writes via the same atomic rename path that the rest of the tool uses. A backup of the previous registry is still taken first.
+- **Fixed database errors on slower hardware right after Home Assistant stopped** — The tool waited a fixed 5 seconds after stopping Home Assistant before opening the database. On slow hardware (Pi with HDD, busy HAOS) this wasn't always long enough — the WAL was still flushing and SQLite would raise "database is locked". The tool now polls the database until it's actually unlocked, up to 30 seconds, instead of guessing.
+- **Fixed the suffix-fix menu option crashing the whole session on disk errors** — If the registry write failed mid-way (disk full, permissions), the error escaped the handler and dropped you out of the interactive menu. It's now caught and reported cleanly, and you stay on the menu.
+- **Fixed `--dry-run` summary not listing database purge counts** — The text summary at the end of `python3 ha-cleanup.py --dry-run` showed orphan / deleted / suffix / old-backup counts, but not states or events from the purge phase. All five numbers now appear.
+
+### Improvements
+
+- **Clearer messages when Home Assistant won't stop** — Previously, "Could not stop HA automatically" was all you saw. The tool now captures the `ha` / `systemctl` / `docker` stderr at debug level, so enabling debug logging surfaces the actual reason (addon missing, permission denied, wrong container name).
+
+---
+
 ## [1.6.0] — 2026-05-09
 
 **Database purge performance + reliability release**
 
 ### Features
 
-- **Dramatically faster orphan cleanup on large databases** — A 500MB+ database that previously hung for 10+ minutes now completes in under a minute. Switched to a `LEFT JOIN` pattern that SQLite can optimize properly.
+- **Dramatically faster orphan cleanup on large databases** — A 500MB+ database that previously hung for 10+ minutes now completes in under a minute. Switched to a `LEFT JOIN` pattern that SQLite can optimise properly.
 - **Progress feedback throughout the entire purge** — Every phase (counting, deleting states, deleting events, cleaning orphans, VACUUM) now shows elapsed time and batch progress, so you always know the script is still working. The final partial batch is now logged too — no more silent gap at the end.
 - **Smart VACUUM with disk space check** — VACUUM now checks if you have enough free disk space before starting. If space is tight, it warns you and skips instead of potentially failing mid-way.
 - **Adaptive batch sizing** — Batch size now adjusts to how many rows need deleting. Small databases finish faster with fewer batches, large databases use bigger batches for efficiency.
@@ -88,7 +111,7 @@ All notable changes to this project will be documented in this file.
 
 ### Improvements
 
-- **Atomic file writes with locking** — Registry saves now use a temp file, `fsync`, `fcntl.flock`, and atomic rename to prevent corruption if HA and the tool write at the same time.
+- **Atomic file writes** — Registry saves now use a temp file, `fsync`, and atomic rename to prevent corruption if HA and the tool write at the same time.
 - **JSON caching with mtime invalidation** — Registry files are cached in memory and only re-read when the file on disk actually changes, reducing I/O during repeated operations.
 - **Backup retention is now configurable** — Uses the `BACKUP_RETENTION_DAYS` constant (default 7 days) instead of a hardcoded value.
 - **Old backup cleanup reports more detail** — Tells you how many backups exist and whether any were within the retention window.

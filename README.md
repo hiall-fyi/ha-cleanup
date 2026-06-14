@@ -3,10 +3,10 @@
 <div align="center">
 
 <!-- Platform Badges -->
-![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.3+-blue?style=for-the-badge&logo=home-assistant) ![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.6+-blue?style=for-the-badge&logo=home-assistant) ![Python](https://img.shields.io/badge/Python-3.13+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 
 <!-- Status Badges -->
-![Version](https://img.shields.io/badge/Version-1.6.0-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.7.0-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
 
 <!-- Community Badges -->
 ![GitHub stars](https://img.shields.io/github/stars/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub forks](https://img.shields.io/github/forks/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub issues](https://img.shields.io/github/issues/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub last commit](https://img.shields.io/github/last-commit/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github)
@@ -44,10 +44,10 @@ Home Assistant accumulates "ghost entities" over time - entities that persist af
 | **Orphaned Entity Cleanup** | Removes entities with missing device/config/automation/script/scene |
 | **Fix Numeric Suffix** | Interactive selection to fix `_2`, `_3` suffixes, with collision detection so you can't accidentally rename two entities to the same ID |
 | **Deleted Registry Cleanup** | Clears `deleted_entities` and `deleted_devices` lists |
-| **Database Purge** | Removes states/events older than your recorder setting, with optimized batch deletes, adaptive batch sizing, and real-time progress |
+| **Database Purge** | Removes states/events older than your recorder setting, with optimised batch deletes, adaptive batch sizing, and real-time progress |
 | **Smart VACUUM** | Checks disk space before running VACUUM, skips if there's not enough room |
 | **Restore from Backup** | Selective or full restore of entities from backup files, safe against concurrent HA writes |
-| **Auto-Detect Config** | Reads `purge_keep_days` from your HA recorder configuration |
+| **Auto-Detect Config** | Reads `purge_keep_days` from `configuration.yaml`, `packages/*.yaml`, or the recorder config entry, and logs which source it used |
 | **Dry-Run Mode** | Preview all changes (including old backup cleanup) without modifying anything |
 | **Auto Backup** | Backs up registry files before any modifications, with sub-second collision protection |
 
@@ -56,7 +56,7 @@ Home Assistant accumulates "ghost entities" over time - entities that persist af
 ## Prerequisites
 
 - **Home Assistant**: Any installation type (HAOS, Docker, Core)
-- **Python**: 3.12 or higher
+- **Python**: 3.13 or higher
 - **Access**: SSH or terminal access to HA config directory
 
 ---
@@ -84,10 +84,10 @@ python3 ha-cleanup.py
 
 ```
 ======================================================================
-  Home Assistant Cleanup Tool  v1.6.0
+  Home Assistant Cleanup Tool  v1.7.0
 ======================================================================
   Config: /homeassistant
-  Database: 4768.8 MB
+  Database: 5496.2 MB
 ----------------------------------------------------------------------
   ⚠️  This tool modifies HA registries and database.
      Always back up first.
@@ -95,10 +95,10 @@ python3 ha-cleanup.py
      progress will be shown.
 ======================================================================
 
-  1. Full cleanup (options 2-4, 6 — optimized)
+  1. Full cleanup (options 2-4, 6 — optimised)
   2. Remove orphaned entities (missing device/config/definition)
   3. Clean deleted registry items (deleted_entities/devices)
-  4. Purge old database records (optimized batch + progress)
+  4. Purge old database records (optimised batch + progress)
   5. Fix numeric suffix (_2, _3, etc.) - interactive
   6. Clean old backup files (>7 days)
   7. Restore from backup (selective or full)
@@ -128,32 +128,34 @@ python3 ha-cleanup.py
 Select `d` from the menu to preview all changes:
 
 ```
-[2026-05-09 11:08:00] ==================================================
-[2026-05-09 11:08:00] Home Assistant Cleanup (DRY RUN)
-[2026-05-09 11:08:00] ==================================================
-[2026-05-09 11:08:00] Config path: /homeassistant
-[2026-05-09 11:08:00] Database size: 4768.8 MB
+[2026-06-14 19:46:05] ==================================================
+[2026-06-14 19:46:05] Home Assistant Cleanup (DRY RUN)
+[2026-06-14 19:46:05] ==================================================
+[2026-06-14 19:46:05] Config path: /homeassistant
+[2026-06-14 19:46:05] Database size: 5496.2 MB
 
-[2026-05-09 11:08:01] ✓ No orphaned entities found
-[2026-05-09 11:08:01] Would clean 400 deleted entities
-[2026-05-09 11:08:01] Would clean 83 deleted devices
-[2026-05-09 11:08:01] Using purge_keep_days: 14
-[2026-05-09 11:08:01]   [Count] Starting...
-[2026-05-09 11:08:10]   [Count] Done in 9.0s — 7,056,691 states, 131,008 events
-[2026-05-09 11:08:10] Would purge 7,056,691 states, 131,008 events older than 14 days
-[2026-05-09 11:08:10] Would VACUUM (DB: 4768.8 MB, free: 12500.0 MB, est. 48s)
-[2026-05-09 11:08:10] Found 5 entities with numeric suffix:
-[2026-05-09 11:08:10]   - sensor.living_room_temperature_2 -> sensor.living_room_temperature (climate)
+[2026-06-14 19:46:05] Found 10 orphaned entities:
+[2026-06-14 19:46:05]   - amplifi_ce: device_tracker.pixel_6 (None)
+[2026-06-14 19:46:05]   - script: script.freeze_protection_evaluate (Freeze Protection - Evaluate)
 ...
-[2026-05-09 11:08:10] Would remove 2 old backup files
+[2026-06-14 19:46:05] Would clean 55 deleted entities
+[2026-06-14 19:46:05] Would clean 4 deleted devices
+[2026-06-14 19:46:05] Using purge_keep_days: 14 (from default)
+[2026-06-14 19:46:05]   [Count] Starting...
+[2026-06-14 19:46:06]   [Count] Done in 1.6s — 7,984,844 states, 88,636 events
+[2026-06-14 19:46:06] Would purge 7,984,844 states, 88,636 events older than 14 days
+[2026-06-14 19:46:06] Would VACUUM (DB: 5496.2 MB, free: 7884.6 MB, est. 55s)
+[2026-06-14 19:46:06] Found 86 entities with numeric suffix:
+[2026-06-14 19:46:06]   - sensor.pixel_9_pro_sim_2 -> sensor.pixel_9_pro_sim (mobile_app)
+[2026-06-14 19:46:06]   - sensor.met_office_pm2_5 -> sensor.met_office_pm2 (atmos_ce)
+...
 
-[2026-05-09 11:08:10] ==================================================
-[2026-05-09 11:08:10] Summary:
-[2026-05-09 11:08:10]   Orphaned entities: 0
-[2026-05-09 11:08:10]   Deleted registry items: 483
-[2026-05-09 11:08:10]   Suffix fixes: 5
-[2026-05-09 11:08:10]   Old backup files: 2
-[2026-05-09 11:08:10] ==================================================
+[2026-06-14 19:46:06] ==================================================
+[2026-06-14 19:46:06] Summary:
+[2026-06-14 19:46:06]   Orphaned entities: 10
+[2026-06-14 19:46:06]   Deleted registry items: 59
+[2026-06-14 19:46:06]   Suffix fixes: 86
+[2026-06-14 19:46:06] ==================================================
 ```
 
 ### Numeric Suffix Fix (Interactive)
@@ -341,20 +343,20 @@ Runs all cleanup operations in sequence (except suffix fix which requires manual
 
 ```
 ⚠️  This will stop Home Assistant. Continue? [y/N]: y
-[2026-05-09 11:09:40] Stopping Home Assistant...
-[2026-05-09 11:10:01] ✓ Removed 5 orphaned entities
-[2026-05-09 11:10:02] ✓ Cleaned 400 deleted entities
-[2026-05-09 11:10:02] ✓ Cleaned 83 deleted devices
-[2026-05-09 11:10:02] Using purge_keep_days: 14
-[2026-05-09 11:10:02]   [Count] Starting...
-[2026-05-09 11:10:10]   [Count] Done in 8.0s — 7,056,691 states, 131,008 events
-[2026-05-09 11:10:10] Purging 7,056,691 states, 131,008 events older than 14 days
+[2026-06-14 19:48:40] Stopping Home Assistant...
+[2026-06-14 19:48:49] ✓ Removed 10 orphaned entities
+[2026-06-14 19:48:49] ✓ Cleaned 55 deleted entities
+[2026-06-14 19:48:49] ✓ Cleaned 4 deleted devices
+[2026-06-14 19:48:49] Using purge_keep_days: 14 (from default)
+[2026-06-14 19:48:49]   [Count] Starting...
+[2026-06-14 19:48:49]   [Count] Done in 0.4s — 7,985,735 states, 88,646 events
+[2026-06-14 19:48:49] Purging 7,985,735 states, 88,646 events older than 14 days
 ...
-[2026-05-09 11:17:13] ✓ Database purged
-[2026-05-09 11:17:13] ✓ No old backup files to remove (found 3 backups, all within 7 days)
-[2026-05-09 11:17:13] Database: 4768.8 MB → 2116.2 MB (2652.6 MB saved)
-[2026-05-09 11:17:13] Starting Home Assistant...
-[2026-05-09 11:17:23] Done!
+[2026-06-14 20:05:08] ✓ Database purged
+[2026-06-14 20:05:08] ✓ No old backup files to remove (found 3 backups, all within 7 days)
+[2026-06-14 20:05:08] Database: 5496.2 MB → 2527.6 MB (2968.5 MB saved)
+[2026-06-14 20:05:08] Starting Home Assistant...
+[2026-06-14 20:05:29] Done!
 
 ⚠️  Suffix fix requires manual selection. Run option 5 separately.
 ```
@@ -382,11 +384,11 @@ Removes entities that reference deleted devices, config entries, or definitions.
 
 ```
 ⚠️  This will stop Home Assistant. Continue? [y/N]: y
-[2026-05-09 11:09:40] Stopping Home Assistant...
-[2026-05-09 11:10:01] ✓ Removed 5 orphaned entities
-[2026-05-09 11:10:01] ✓ No old backup files to remove (found 3 backups, all within 7 days)
-[2026-05-09 11:10:01] Starting Home Assistant...
-[2026-05-09 11:10:11] Done!
+[2026-06-14 19:48:40] Stopping Home Assistant...
+[2026-06-14 19:48:49] ✓ Removed 10 orphaned entities
+[2026-06-14 19:48:49] ✓ No old backup files to remove (found 3 backups, all within 7 days)
+[2026-06-14 19:48:49] Starting Home Assistant...
+[2026-06-14 19:48:59] Done!
 ```
 
 **When to use:**
@@ -416,12 +418,12 @@ Over time, these lists can grow large and are safe to clean.
 
 ```
 ⚠️  This will stop Home Assistant. Continue? [y/N]: y
-[2026-05-09 11:08:53] Stopping Home Assistant...
-[2026-05-09 11:09:11] ✓ Cleaned 400 deleted entities
-[2026-05-09 11:09:11] ✓ Cleaned 83 deleted devices
-[2026-05-09 11:09:11] ✓ No old backup files to remove (found 3 backups, all within 7 days)
-[2026-05-09 11:09:11] Starting Home Assistant...
-[2026-05-09 11:09:36] Done!
+[2026-06-14 19:48:40] Stopping Home Assistant...
+[2026-06-14 19:48:49] ✓ Cleaned 55 deleted entities
+[2026-06-14 19:48:49] ✓ Cleaned 4 deleted devices
+[2026-06-14 19:48:49] ✓ No old backup files to remove (found 3 backups, all within 7 days)
+[2026-06-14 19:48:49] Starting Home Assistant...
+[2026-06-14 19:48:59] Done!
 ```
 
 **When to use:**
@@ -441,12 +443,12 @@ Removes old states and events from the database based on your recorder configura
 
 **How it works:**
 
-1. Reads `purge_keep_days` from your recorder config (default: 14 days)
+1. Reads `purge_keep_days` from your recorder config and logs where it found it (default: 14 days)
 2. Tunes SQLite settings (cache size, memory-mapped I/O) for faster deletes
 3. Counts purgeable states and events
 4. Batch deletes states older than X days (adaptive batch size with progress)
 5. Batch deletes events older than X days
-6. Cleans orphaned state_attributes using optimized LEFT JOIN queries
+6. Cleans orphaned state_attributes using optimised LEFT JOIN queries
 7. Cleans orphaned event_data the same way
 8. Checks disk space, then runs VACUUM to reclaim space (skips if not enough room)
 9. Restores SQLite settings to defaults
@@ -454,35 +456,35 @@ Removes old states and events from the database based on your recorder configura
 **Example output:**
 
 ```
-Using purge_keep_days: 14
-
 ⚠️  This will stop Home Assistant. Continue? [y/N]: y
-[2026-05-09 11:09:40] Stopping Home Assistant...
-[2026-05-09 11:10:01] Using purge_keep_days: 14
-[2026-05-09 11:10:01]   [Count] Starting...
-[2026-05-09 11:10:10]   [Count] Done in 9.0s — 7,056,691 states, 131,008 events
-[2026-05-09 11:10:10] Purging 7,056,691 states, 131,008 events older than 14 days
-[2026-05-09 11:10:10]   [States] Starting...
-[2026-05-09 11:10:12]     Batch 1/142: deleted 50,000/7,056,691 (0%)
-[2026-05-09 11:10:14]     Batch 2/142: deleted 100,000/7,056,691 (1%)
+[2026-06-14 19:48:40] Stopping Home Assistant...
+[2026-06-14 19:48:49] Using purge_keep_days: 14 (from default)
+[2026-06-14 19:48:49]   [Count] Starting...
+[2026-06-14 19:48:49]   [Count] Done in 0.4s — 7,985,735 states, 88,646 events
+[2026-06-14 19:48:49] Purging 7,985,735 states, 88,646 events older than 14 days
+[2026-06-14 19:48:49]   [States] Starting...
+[2026-06-14 19:48:52]     Batch 1/80: deleted 100,000/7,985,735 (1%)
+[2026-06-14 19:48:54]     Batch 2/80: deleted 200,000/7,985,735 (2%)
 ...
-[2026-05-09 11:14:28]     Batch 142/142: deleted 7,056,691/7,056,691 (100%)
-[2026-05-09 11:14:30]   [States] Done in 260.0s — deleted 7,056,691 rows
-[2026-05-09 11:14:30]   [Events] Starting...
-[2026-05-09 11:14:35]   [Events] Done in 5.0s — deleted 131,008 rows
-[2026-05-09 11:14:35]   [Orphan Attributes] Starting...
-[2026-05-09 11:14:35]     Counting orphans...
-[2026-05-09 11:14:36]     Found 1,200,000 orphan rows
-[2026-05-09 11:14:50]   [Orphan Attributes] Done in 15.0s — deleted 1,200,000 rows
-[2026-05-09 11:14:50]   [Orphan Event Data] Starting...
-[2026-05-09 11:14:51]   [Orphan Event Data] Done in 1.0s — deleted 50,000 rows
-[2026-05-09 11:14:51]   [VACUUM] Starting...
-[2026-05-09 11:14:51]     DB size before: 4768.8 MB
-[2026-05-09 11:17:13]   [VACUUM] Done in 142.0s — DB: 4768.8 → 2116.2 MB (2652.6 MB saved)
-[2026-05-09 11:17:13] ✓ Database purged
-[2026-05-09 11:17:13] Database: 4768.8 MB → 2116.2 MB (2652.6 MB saved)
-[2026-05-09 11:17:13] Starting Home Assistant...
-[2026-05-09 11:17:23] Done!
+[2026-06-14 19:53:25]     Batch 80/80: deleted 7,985,735/7,985,735 (100%)
+[2026-06-14 19:53:25]   [States] Done in 275.7s — deleted 7,985,735 rows
+[2026-06-14 19:53:25]   [Events] Starting...
+[2026-06-14 19:53:28]   [Events] Done in 2.4s — deleted 88,646 rows
+[2026-06-14 19:53:28]   [Orphan Attributes] Starting...
+[2026-06-14 19:53:28]     Counting orphans...
+[2026-06-14 19:53:33]     Found 2,926,818 orphan rows
+[2026-06-14 20:04:32]   [Orphan Attributes] Done in 664.5s — deleted 2,926,818 rows
+[2026-06-14 20:04:32]   [Orphan Event Data] Starting...
+[2026-06-14 20:04:32]     Counting orphans...
+[2026-06-14 20:04:32]     Found 497 orphan rows
+[2026-06-14 20:04:32]   [Orphan Event Data] Done in 0.1s — deleted 497 rows
+[2026-06-14 20:04:32]   [VACUUM] Starting...
+[2026-06-14 20:04:32]     DB size before: 5496.2 MB
+[2026-06-14 20:05:08]   [VACUUM] Done in 36.1s — DB: 5496.2 → 2527.6 MB (2968.5 MB saved)
+[2026-06-14 20:05:08] ✓ Database purged
+[2026-06-14 20:05:08] Database: 5496.2 MB → 2527.6 MB (2968.5 MB saved)
+[2026-06-14 20:05:08] Starting Home Assistant...
+[2026-06-14 20:05:29] Done!
 ```
 
 **When to use:**
@@ -491,7 +493,7 @@ Using purge_keep_days: 14
 - Want to speed up database queries
 - Regular maintenance (monthly)
 
-**Where purge_keep_days is read from:**
+**Where purge_keep_days is read from** (checked in this order):
 
 1. `configuration.yaml`:
    ```yaml
@@ -499,9 +501,13 @@ Using purge_keep_days: 14
      purge_keep_days: 14
    ```
 
-2. Recorder integration options in `.storage/core.config_entries`
+2. `packages/*.yaml` — if you split your config with `packages: !include_dir_named packages/` and put `recorder:` in there
 
-3. Default: 14 days if not configured
+3. Recorder integration options in `.storage/core.config_entries`
+
+4. Default: 14 days if not configured
+
+The log line tells you which one was used, e.g. `Using purge_keep_days: 14 (from packages/*.yaml)`. If it says `(from default)` and you expected it to find your setting, that's your cue to check where `recorder:` actually lives.
 
 **⚠️ Warning:** This permanently deletes historical data. Make sure your `purge_keep_days` setting is correct before running.
 
@@ -657,7 +663,7 @@ Soft-deleted entries in:
 Old records based on your `recorder.purge_keep_days` setting:
 - States older than X days
 - Events older than X days
-- Orphaned state_attributes and event_data (cleaned with optimized queries)
+- Orphaned state_attributes and event_data (cleaned with optimised queries)
 - VACUUM to reclaim disk space (with disk space check)
 
 ---
@@ -706,7 +712,7 @@ Ensure Home Assistant is fully stopped before running cleanup.
 ### VACUUM Skipped Due to Disk Space
 
 ```
-⚠️  Skipping VACUUM — not enough disk space (DB: 4768.8 MB, free: 3000.0 MB, need: 5245.7 MB)
+⚠️  Skipping VACUUM — not enough disk space (DB: 5496.2 MB, free: 3000.0 MB, need: 6045.8 MB)
 ```
 
 VACUUM needs roughly the same amount of free space as your database file. Free up disk space or skip VACUUM — the purge itself still works without it.
@@ -773,9 +779,9 @@ If you find this script useful, please consider giving it a star!
 
 ---
 
-**Version**: 1.6.0  
-**Last Updated**: 2026-05-09  
-**Tested On**: Home Assistant 2026.3.1 (HAOS, Docker, Core)
+**Version**: 1.7.0  
+**Last Updated**: 2026-06-14  
+**Tested On**: Home Assistant 2026.6.3 (HAOS, Docker, Core)
 
 ---
 
