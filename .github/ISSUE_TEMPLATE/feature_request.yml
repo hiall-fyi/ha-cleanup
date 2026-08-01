@@ -1,0 +1,43 @@
+name: Feature request
+description: Suggest an improvement or a new cleanup operation
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Worth knowing before you write: this tool deliberately stays a single
+        file you can drop onto a box and run, with no dependencies beyond the
+        standard library. Requests that need a package installed, or that turn it
+        into an add-on or integration, are unlikely to land. Everything else is
+        fair game.
+  - type: checkboxes
+    attributes:
+      label: Before you start
+      options:
+        - label: I have searched the existing issues and discussions for this
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What are you trying to clean up or diagnose that you can't today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed solution
+      description: How you imagine it working, if you have a shape in mind.
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Existing workaround, if any
+  - type: checkboxes
+    attributes:
+      label: Does it touch anything the tool writes to?
+      description: Optional, but it tells me how carefully this needs handling.
+      options:
+        - label: The entity or device registry
+        - label: The recorder database
+        - label: Backup files
+        - label: Read-only, it would only report something

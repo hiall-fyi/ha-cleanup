@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 
 # Configure logging
 logging.basicConfig(
@@ -107,10 +107,15 @@ VACUUM_SPACE_SAFETY_MARGIN = 1.1          # 10% safety margin
 VACUUM_SPEED_ESTIMATE_MB_PER_SEC = 100.0  # rough SSD estimate for ETA
 
 # Regex patterns (compiled at module level for performance)
-NUMERIC_SUFFIX_PATTERN = re.compile(r"_(\d+)$")
 YAML_ID_PATTERN = re.compile(r'(?:^|\n)\s*-?\s*id:\s*["\']?([^"\'\n\r]+)["\']?')
+# Anchored to column zero so options nested under an entry never match.
+YAML_TOP_LEVEL_KEY_PATTERN = re.compile(r"^([A-Za-z0-9_-]+):[ \t]*(?:#.*)?$", re.MULTILINE)
 BACKUP_PATTERN = re.compile(r"\.backup\.(\d{8}_\d{6})(?:_\d+)?$")
-DUPLICATE_SUFFIX_PATTERN = re.compile(r"_([2-9]|\d{2,})$")
+# Home Assistant's de-duplication counts up from 2 and never emits `_1`, so
+# `_2`-`_99` covers real collisions without matching model numbers.
+DUPLICATE_SUFFIX_PATTERN = re.compile(r"_([2-9]|[1-9]\d)$")
+MAC_TAIL_SEGMENT_PATTERN = re.compile(r"^[0-9a-f]{2}$", re.IGNORECASE)
+PORT_SUFFIX_BASE_PATTERN = re.compile(r"_(?:tcp|udp)$", re.IGNORECASE)
 
 
 # ============================================================
@@ -152,48 +157,37 @@ class _TableRef(NamedTuple):
 
 
 # ============================================================
-# Simple Cache for JSON files
-# ============================================================
-
-_json_cache: dict[Path, tuple[float, dict[str, Any]]] = {}  # path -> (mtime, data)
-
-
-def _get_cached_json(path: Path) -> dict[str, Any] | None:
-    """Get cached JSON if file hasn't changed."""
-    if path not in _json_cache:
-        return None
-
-    try:
-        current_mtime = path.stat().st_mtime
-        cached_mtime, cached_data = _json_cache[path]
-        if current_mtime == cached_mtime:
-            return cached_data
-    except OSError:
-        pass
-
-    return None
-
-
-def _cache_json(path: Path, data: dict[str, Any]) -> None:
-    """Cache JSON data with file mtime."""
-    try:
-        mtime = path.stat().st_mtime
-        _json_cache[path] = (mtime, data)
-    except OSError:
-        pass
-
-
-def invalidate_cache(path: Path | None = None) -> None:
-    """Invalidate JSON cache for specific path or all."""
-    if path:
-        _json_cache.pop(path, None)
-    else:
-        _json_cache.clear()
-
-
-# ============================================================
 # Utility Functions
 # ============================================================
+
+def _records(data: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """Read a list from `data["data"][<key>]`, or `[]` if missing or malformed.
+
+    Always returns a list, so callers can `len()` or iterate without guarding.
+    Read-only: mutation sites index explicitly instead.
+    """
+    if not isinstance(data, dict):
+        return []
+    payload = data.get("data")
+    if not isinstance(payload, dict):
+        return []
+    records = payload.get(key)
+    if not isinstance(records, list):
+        return []
+    return records
+
+
+def _has_record_list(data: dict[str, Any], key: str) -> bool:
+    """Check that `data["data"][<key>]` really is a list.
+
+    Restore paths need to tell an empty registry from a truncated one, which
+    `_records` deliberately flattens together.
+    """
+    if not isinstance(data, dict):
+        return False
+    payload = data.get("data")
+    return isinstance(payload, dict) and isinstance(payload.get(key), list)
+
 
 def backup_file(path: Path) -> Path:
     """Create a timestamped backup of a file."""
@@ -211,23 +205,19 @@ def backup_file(path: Path) -> Path:
     return backup
 
 
-def load_json(path: Path, use_cache: bool = True) -> dict[str, Any]:
-    """Load JSON file with error handling and optional caching."""
+def load_json(path: Path) -> dict[str, Any]:
+    """Load JSON file with error handling.
+
+    Reads from disk every call. Callers mutate what they get, so they must not
+    share an object: do not add a cache here.
+    """
     if not path.exists():
         msg = f"File not found: {path}"
         raise FileNotFoundError(msg)
 
-    # Check cache first
-    if use_cache:
-        cached = _get_cached_json(path)
-        if cached is not None:
-            return cached
-
     try:
         with path.open(encoding="utf-8") as f:
             data: dict[str, Any] = json.load(f)
-            if use_cache:
-                _cache_json(path, data)
             return data
     except json.JSONDecodeError as e:
         msg = f"Invalid JSON in {path}: {e}"
@@ -268,9 +258,6 @@ def save_json(path: Path, data: dict[str, Any]) -> None:
         if original_mode is not None:
             path.chmod(original_mode)
 
-        # Invalidate cache after write
-        invalidate_cache(path)
-
     except Exception as e:
         # Clean up temp file on error
         if temp_path.exists():
@@ -280,10 +267,19 @@ def save_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def get_db_size() -> float:
-    """Get database size in MB."""
-    if DB_PATH.exists():
-        return DB_PATH.stat().st_size / (1024 * 1024)
-    return 0.0
+    """Get total database size in MB, counting the `-wal` and `-shm` sidecars.
+
+    In WAL mode freed pages sit in `-wal` until a checkpoint, so the main file
+    alone understates what is on disk.
+    """
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        sidecar = Path(f"{DB_PATH}{suffix}")
+        try:
+            total += sidecar.stat().st_size
+        except OSError:
+            continue  # absent (not in WAL mode / never created) or unreadable
+    return total / (1024 * 1024)
 
 
 def _run_ha_command(cmd: list[str]) -> bool:
@@ -376,7 +372,6 @@ def ha_stopped() -> Generator[str | None]:
     try:
         yield method
     finally:
-        invalidate_cache()
         logger.info("Starting Home Assistant...")
         if method:
             if not start_ha(method):
@@ -461,7 +456,7 @@ def get_recorder_purge_days() -> tuple[int, str]:
     if CONFIG_ENTRIES.exists():
         try:
             data = load_json(CONFIG_ENTRIES)
-            for entry in data.get("data", {}).get("entries", []):
+            for entry in _records(data, "entries"):
                 if entry.get("domain") == "recorder":
                     options = entry.get("options", {})
                     if "purge_keep_days" in options:
@@ -477,41 +472,38 @@ def get_recorder_purge_days() -> tuple[int, str]:
 # ============================================================
 
 def extract_ids_from_yaml_file(path: Path) -> set[str]:
-    """Extract IDs from a YAML file using regex."""
+    """Extract entity IDs from a YAML file, covering both Home Assistant styles.
+
+    Automations are a list of entries each carrying an `id:` field. Scripts and
+    scenes are a mapping whose top-level key is itself the ID.
+    """
     ids: set[str] = set()
     if not path.exists():
         return ids
 
     try:
         content = path.read_text(encoding="utf-8")
-        # Use pre-compiled pattern
-        for match in YAML_ID_PATTERN.finditer(content):
-            id_value = match.group(1).strip()
-            if id_value and not id_value.startswith("#"):
-                ids.add(id_value)
     except OSError:
-        pass
+        return ids
 
+    for match in YAML_ID_PATTERN.finditer(content):
+        id_value = match.group(1).strip()
+        if id_value and not id_value.startswith("#"):
+            ids.add(id_value)
+
+    ids.update(YAML_TOP_LEVEL_KEY_PATTERN.findall(content))
     return ids
 
 
 def get_entity_ids(
-    _entity_type: str,
     folder_path: Path,
     yaml_file: str,
     storage_file: str,
 ) -> set[str]:
-    """Get entity IDs from YAML files and UI storage.
+    """Collect entity IDs from a folder of YAML files, a root YAML, and UI storage.
 
-    Args:
-        _entity_type: Type of entity (automation, script, scene) — reserved
-        folder_path: Path to folder containing YAML files
-        yaml_file: Name of root YAML file (e.g., "automations.yaml")
-        storage_file: Name of storage file (e.g., "automations")
-
-    Returns:
-        Set of entity IDs
-
+    `yaml_file` is the root file (e.g. "automations.yaml"), `storage_file` the
+    name under `.storage` (e.g. "automations").
     """
     ids: set[str] = set()
 
@@ -529,7 +521,7 @@ def get_entity_ids(
     if ui_storage.exists():
         try:
             data = load_json(ui_storage)
-            for item in data.get("data", {}).get("items", []):
+            for item in _records(data, "items"):
                 if item.get("id"):
                     ids.add(item["id"])
         except (FileNotFoundError, ValueError, KeyError):
@@ -540,19 +532,17 @@ def get_entity_ids(
 
 def get_automation_ids() -> set[str]:
     """Get all automation IDs from YAML files and UI storage."""
-    return get_entity_ids(
-        "automation", AUTOMATION_PATH, "automations.yaml", "automations",
-    )
+    return get_entity_ids(AUTOMATION_PATH, "automations.yaml", "automations")
 
 
 def get_script_ids() -> set[str]:
     """Get all script IDs from YAML files and UI storage."""
-    return get_entity_ids("script", SCRIPT_PATH, "scripts.yaml", "scripts")
+    return get_entity_ids(SCRIPT_PATH, "scripts.yaml", "scripts")
 
 
 def get_scene_ids() -> set[str]:
     """Get all scene IDs from YAML files and UI storage."""
-    return get_entity_ids("scene", SCENE_PATH, "scenes.yaml", "scenes")
+    return get_entity_ids(SCENE_PATH, "scenes.yaml", "scenes")
 
 
 # ============================================================
@@ -608,10 +598,10 @@ def find_orphaned_entities() -> list[tuple[str, str, str]]:
         return []
 
     devices = {
-        d["id"] for d in device_data.get("data", {}).get("devices", [])
+        d["id"] for d in _records(device_data, "devices")
     }
     config_entries = {
-        e["entry_id"] for e in config_data.get("data", {}).get("entries", [])
+        e["entry_id"] for e in _records(config_data, "entries")
     }
     definition_ids = {
         "automation": get_automation_ids(),
@@ -625,7 +615,7 @@ def find_orphaned_entities() -> list[tuple[str, str, str]]:
             entity.get("entity_id", ""),
             entity.get("original_name", ""),
         )
-        for entity in entity_data.get("data", {}).get("entities", [])
+        for entity in _records(entity_data, "entities")
         if _is_entity_orphan(entity, devices, config_entries, definition_ids)
     ]
 
@@ -648,7 +638,7 @@ def cleanup_orphaned_entities(dry_run: bool = False) -> int:
     backup_file(ENTITY_REGISTRY)
 
     orphan_eids = {o[1] for o in orphans}
-    data = load_json(ENTITY_REGISTRY, use_cache=False)
+    data = load_json(ENTITY_REGISTRY)
     original_count = len(data["data"]["entities"])
     data["data"]["entities"] = [
         e for e in data["data"]["entities"]
@@ -680,7 +670,7 @@ def cleanup_deleted_items(dry_run: bool = False) -> int:
             logger.info("⚠️  Error loading %s: %s", path, e)
             continue
 
-        deleted_items = data.get("data", {}).get(key, [])
+        deleted_items = _records(data, key)
         n = len(deleted_items)
 
         if n > 0:
@@ -729,6 +719,8 @@ def _log_phase_end(phase: str, start_time: float, detail: str = "") -> None:
     elapsed = time.monotonic() - start_time
     suffix = f" — {detail}" if detail else ""
     logger.info("  [%s] Done in %ss%s", phase, format(elapsed, ".1f"), suffix)
+
+
 def _configure_pragmas(conn: sqlite3.Connection) -> dict[str, Any]:
     """Set optimised PRAGMAs for purge operations.
 
@@ -756,6 +748,39 @@ def _restore_pragmas(
     for pragma, value in originals.items():
         with contextlib.suppress(sqlite3.Error):
             conn.execute(f"PRAGMA {pragma} = {value}")
+
+
+def _set_journal_mode_wal(conn: sqlite3.Connection) -> str | None:
+    """Switch to WAL for the purge, returning the mode to restore afterwards.
+
+    `journal_mode` persists in the database file, unlike the PRAGMAs above, so
+    it has to be put back. Returns None when there is nothing to restore.
+    """
+    original: str | None = None
+    with contextlib.suppress(sqlite3.Error):
+        row = conn.execute("PRAGMA journal_mode").fetchone()
+        if row and str(row[0]).lower() != "wal":
+            original = str(row[0])
+    conn.execute("PRAGMA journal_mode=WAL")
+    return original
+
+
+def _checkpoint_and_restore_journal_mode(
+    conn: sqlite3.Connection,
+    original_mode: str | None,
+) -> None:
+    """Fold the WAL back into the main DB, then restore journal_mode.
+
+    Runs before VACUUM so the size it reports is the real one. Best-effort: a
+    failure here must not fail a purge that already succeeded.
+    """
+    with contextlib.suppress(sqlite3.Error):
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    if original_mode is None:
+        return
+    with contextlib.suppress(sqlite3.Error):
+        conn.execute(f"PRAGMA journal_mode={original_mode}")
 
 
 def _ensure_index(
@@ -821,16 +846,19 @@ def _count_purgeable(
     return (states, events)
 
 
-def _batch_delete_table(
+def _run_batched_delete(
     db: _DbCtx,
-    target: _TableRef,
-    cutoff_ts: int,
+    sql: str,
+    params: tuple[Any, ...],
     total: int,
     batch_size: int,
 ) -> int:
-    """Batch delete rows older than cutoff from a table.
+    """Run a batched DELETE loop with per-batch progress, commit, and break.
 
-    Returns total deleted count.
+    `sql` is a DELETE statement whose final bound parameter is the batch LIMIT;
+    `params` are the parameters that precede that LIMIT (the caller appends the
+    LIMIT). Loops until a batch deletes fewer rows than `batch_size`, which
+    means the table is drained. Returns total deleted count.
     """
     total_deleted = 0
     batch_num = 0
@@ -838,13 +866,7 @@ def _batch_delete_table(
 
     while True:
         batch_num += 1
-        db.cur.execute(
-            f"DELETE FROM {target.table} WHERE rowid IN ("
-            f"  SELECT rowid FROM {target.table}"
-            f"  WHERE {target.column} < ? LIMIT ?"
-            ")",
-            (cutoff_ts, batch_size),
-        )
+        db.cur.execute(sql, (*params, batch_size))
         deleted = db.cur.rowcount
         total_deleted += deleted
         db.conn.commit()
@@ -859,6 +881,50 @@ def _batch_delete_table(
             break
 
     return total_deleted
+
+
+def _unlink_old_state_ids(db: _DbCtx, cutoff_ts: int) -> int:
+    """Clear `states.old_state_id` pointers aimed at rows about to be purged.
+
+    The column is a foreign key back into `states`, so deleting without
+    unlinking first leaves dangling references. Home Assistant's own recorder
+    does the same. Returns the number cleared; a schema without the column is
+    not an error.
+    """
+    try:
+        db.cur.execute(
+            "UPDATE states SET old_state_id = NULL WHERE old_state_id IN ("
+            "  SELECT state_id FROM states WHERE last_updated_ts < ?"
+            ")",
+            (cutoff_ts,),
+        )
+    except sqlite3.OperationalError:
+        return 0  # no old_state_id / no state_id column on this schema
+    unlinked: int = db.cur.rowcount
+    db.conn.commit()
+    if unlinked > 0:
+        logger.info("    Unlinked %s old_state_id references", format(unlinked, ","))
+    return unlinked
+
+
+def _batch_delete_table(
+    db: _DbCtx,
+    target: _TableRef,
+    cutoff_ts: int,
+    total: int,
+    batch_size: int,
+) -> int:
+    """Batch delete rows older than cutoff from a table.
+
+    Returns total deleted count.
+    """
+    sql = (
+        f"DELETE FROM {target.table} WHERE rowid IN ("
+        f"  SELECT rowid FROM {target.table}"
+        f"  WHERE {target.column} < ? LIMIT ?"
+        ")"
+    )
+    return _run_batched_delete(db, sql, (cutoff_ts,), total, batch_size)
 
 
 def _cleanup_orphans(
@@ -891,37 +957,16 @@ def _cleanup_orphans(
 
         logger.info("    Found %s orphan rows", format(orphan_count, ","))
         batch_size = _get_batch_size(orphan_count)
-        total_deleted = 0
-        batch_num = 0
-        total_batches = (orphan_count + batch_size - 1) // batch_size
-
-        while True:
-            batch_num += 1
-            db.cur.execute(
-                f"DELETE FROM {orphan.table} WHERE {orphan.column} IN ("
-                f"  SELECT ot.{orphan.column} FROM {orphan.table} ot"
-                f"  LEFT JOIN {ref.table} rt"
-                f"    ON ot.{orphan.column} = rt.{ref.column}"
-                f"  WHERE rt.{ref.column} IS NULL"
-                f"  LIMIT ?"
-                ")",
-                (batch_size,),
-            )
-            deleted = db.cur.rowcount
-            total_deleted += deleted
-            db.conn.commit()
-
-            pct = total_deleted * 100 // orphan_count if orphan_count else 0
-            logger.info(
-                "    Batch %d/%d: deleted %s/%s (%d%%)",
-                batch_num, total_batches,
-                f"{total_deleted:,}", f"{orphan_count:,}", pct,
-            )
-
-            if deleted < batch_size:
-                break
-
-        return total_deleted
+        sql = (
+            f"DELETE FROM {orphan.table} WHERE {orphan.column} IN ("
+            f"  SELECT ot.{orphan.column} FROM {orphan.table} ot"
+            f"  LEFT JOIN {ref.table} rt"
+            f"    ON ot.{orphan.column} = rt.{ref.column}"
+            f"  WHERE rt.{ref.column} IS NULL"
+            f"  LIMIT ?"
+            ")"
+        )
+        return _run_batched_delete(db, sql, (), orphan_count, batch_size)
 
     finally:
         if created_index:
@@ -1006,8 +1051,11 @@ def purge_database(dry_run: bool = False) -> tuple[int, int]:
     cutoff_ts = int((datetime.now(tz=None) - timedelta(days=purge_days)).timestamp())  # noqa: DTZ005 — local time intentional
 
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
+        # `with sqlite3.connect(...)` commits but does not close, and the WAL
+        # only checkpoints once the connection is gone, so close it explicitly.
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            original_journal_mode = _set_journal_mode_wal(conn)
             originals = _configure_pragmas(conn)
             try:
                 cur = conn.cursor()
@@ -1038,27 +1086,20 @@ def purge_database(dry_run: bool = False) -> tuple[int, int]:
 
                 db = _DbCtx(cur=cur, conn=conn)
 
-                # Phase 2: Delete states
-                if states:
-                    t = _log_phase_start("States")
-                    batch_size = _get_batch_size(states)
+                # Only `states` has a self-referencing FK needing an unlink.
+                for phase, target, total in (
+                    ("States", _TableRef("states", "last_updated_ts"), states),
+                    ("Events", _TableRef("events", "time_fired_ts"), events),
+                ):
+                    if not total:
+                        continue
+                    t = _log_phase_start(phase)
+                    if target.table == "states":
+                        _unlink_old_state_ids(db, cutoff_ts)
                     deleted = _batch_delete_table(
-                        db,
-                        _TableRef("states", "last_updated_ts"),
-                        cutoff_ts, states, batch_size,
+                        db, target, cutoff_ts, total, _get_batch_size(total),
                     )
-                    _log_phase_end("States", t, f"deleted {deleted:,} rows")
-
-                # Phase 3: Delete events
-                if events:
-                    t = _log_phase_start("Events")
-                    batch_size = _get_batch_size(events)
-                    deleted = _batch_delete_table(
-                        db,
-                        _TableRef("events", "time_fired_ts"),
-                        cutoff_ts, events, batch_size,
-                    )
-                    _log_phase_end("Events", t, f"deleted {deleted:,} rows")
+                    _log_phase_end(phase, t, f"deleted {deleted:,} rows")
 
                 # Phase 4: Orphan attributes
                 t = _log_phase_start("Orphan Attributes")
@@ -1086,8 +1127,11 @@ def purge_database(dry_run: bool = False) -> tuple[int, int]:
 
             finally:
                 _restore_pragmas(conn, originals)
+                _checkpoint_and_restore_journal_mode(conn, original_journal_mode)
+        finally:
+            conn.close()
 
-        # Phase 6: VACUUM (outside transaction)
+        # Phase 6: VACUUM (outside the transaction, connection closed)
         _maybe_vacuum()
 
     except sqlite3.Error as e:
@@ -1176,14 +1220,22 @@ def scan_backup_files() -> list[BackupInfo]:
                 file_type = "unknown"
 
             # Load JSON and count records (entities or devices depending on type)
+            record_key = "devices" if file_type == "device_registry" else "entities"
             try:
-                data = load_json(backup_path, use_cache=False)  # Don't cache backups
-                record_key = "devices" if file_type == "device_registry" else "entities"
-                entity_count = len(data.get("data", {}).get(record_key, []))
+                data = load_json(backup_path)
             except (ValueError, KeyError):
                 # Corrupted file, skip
                 logger.info("⚠️  Skipping corrupted backup: %s", backup_path.name)
                 continue
+
+            if not _has_record_list(data, record_key):
+                logger.info(
+                    "⚠️  Skipping corrupted backup: %s (no %s list)",
+                    backup_path.name, record_key,
+                )
+                continue
+
+            entity_count = len(_records(data, record_key))
 
             # Calculate file size (use cached stat)
             size_mb = file_stat.st_size / (1024 * 1024)
@@ -1222,11 +1274,11 @@ def compare_registries(
     # Build entity_id -> entity dict for both registries
     backup_entities = {
         e["entity_id"]: e
-        for e in backup_data.get("data", {}).get("entities", [])
+        for e in _records(backup_data, "entities")
     }
     current_entities = {
         e["entity_id"]: e
-        for e in current_data.get("data", {}).get("entities", [])
+        for e in _records(current_data, "entities")
     }
 
     backup_ids = set(backup_entities.keys())
@@ -1311,7 +1363,7 @@ def _print_modified_entities(
 def preview_backup_diff(backup_info: BackupInfo) -> None:
     """Display differences between backup and current registry."""
     try:
-        backup_data = load_json(backup_info.path, use_cache=False)
+        backup_data = load_json(backup_info.path)
         current_data = load_json(ENTITY_REGISTRY)
     except (FileNotFoundError, ValueError) as e:
         logger.info("⚠️  Error loading registries: %s", e)
@@ -1366,38 +1418,49 @@ def _prompt_restore_selection(
     return [deleted[i - 1] for i in sorted(indices)]
 
 
-def _apply_restore(selected_entities: list[dict[str, Any]]) -> int:
-    """Perform the actual restore with HA stopped. Returns count restored."""
+def _restore_with_ha_stopped(
+    build: Callable[[dict[str, Any]], tuple[dict[str, Any], int]],
+) -> int:
+    """Stop HA, back up the registry, build the new registry, save, restart HA.
+
+    `build(fresh_data)` receives the registry re-read AFTER HA has stopped (the
+    copy loaded before user interaction may be stale — HA could have written to
+    it while the user reviewed a preview). It returns `(data_to_save, count)`:
+    a selective restore mutates and returns `fresh_data`, a full restore returns
+    the backup wholesale. This function owns the stop → backup → save → except
+    scaffolding shared by both restore paths.
+    """
     logger.info("Stopping Home Assistant...")
     try:
         with ha_stopped():
             backup_file(ENTITY_REGISTRY)
-
-            # Re-read registry AFTER HA has stopped — the copy loaded before
-            # the user interaction may be stale (HA could have written to it
-            # while the user was reading the preview).
-            fresh_data = load_json(ENTITY_REGISTRY, use_cache=False)
-
-            current_entity_ids = {
-                e["entity_id"] for e in fresh_data["data"]["entities"]
-            }
-            restored_count = 0
-
-            for entity in selected_entities:
-                entity_id = entity.get("entity_id")
-                if entity_id in current_entity_ids:
-                    logger.info("⚠️  Skipping %s (already exists)", entity_id)
-                    continue
-
-                fresh_data["data"]["entities"].append(entity)
-                restored_count += 1
-
-            save_json(ENTITY_REGISTRY, fresh_data)
-            logger.info("✓ Restored %s entities", restored_count)
-            return restored_count
-    except (RuntimeError, FileNotFoundError, ValueError) as e:
+            fresh_data = load_json(ENTITY_REGISTRY)
+            data_to_save, count = build(fresh_data)
+            save_json(ENTITY_REGISTRY, data_to_save)
+            return count
+    except (RuntimeError, OSError, ValueError) as e:
         logger.info("⚠️  Restore failed: %s", e)
         return 0
+
+
+def _apply_restore(selected_entities: list[dict[str, Any]]) -> int:
+    """Perform the actual restore with HA stopped. Returns count restored."""
+    def _merge(fresh_data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        current_entity_ids = {
+            e["entity_id"] for e in fresh_data["data"]["entities"]
+        }
+        restored_count = 0
+        for entity in selected_entities:
+            entity_id = entity.get("entity_id")
+            if entity_id in current_entity_ids:
+                logger.info("⚠️  Skipping %s (already exists)", entity_id)
+                continue
+            fresh_data["data"]["entities"].append(entity)
+            restored_count += 1
+        logger.info("✓ Restored %s entities", restored_count)
+        return fresh_data, restored_count
+
+    return _restore_with_ha_stopped(_merge)
 
 
 def selective_restore_entities(backup_info: BackupInfo, dry_run: bool = False) -> int:
@@ -1406,7 +1469,7 @@ def selective_restore_entities(backup_info: BackupInfo, dry_run: bool = False) -
     Returns count of restored entities.
     """
     try:
-        backup_data = load_json(backup_info.path, use_cache=False)
+        backup_data = load_json(backup_info.path)
         current_data = load_json(ENTITY_REGISTRY)
     except (FileNotFoundError, ValueError) as e:
         logger.info("⚠️  Error loading registries: %s", e)
@@ -1446,13 +1509,12 @@ def full_restore_registry(backup_info: BackupInfo, dry_run: bool = False) -> int
     """
     # Load and validate backup file
     try:
-        backup_data = load_json(backup_info.path, use_cache=False)
+        backup_data = load_json(backup_info.path)
     except (FileNotFoundError, ValueError) as e:
         logger.info("⚠️  Error loading backup: %s", e)
         return 0
 
-    # Check data.entities exists
-    if "data" not in backup_data or "entities" not in backup_data["data"]:
+    if not _has_record_list(backup_data, "entities"):
         logger.info("⚠️  Invalid backup format: missing data.entities")
         return 0
 
@@ -1493,20 +1555,12 @@ def full_restore_registry(backup_info: BackupInfo, dry_run: bool = False) -> int
         print("Aborted.")
         return 0
 
-    # Stop HA
-    logger.info("Stopping Home Assistant...")
-    try:
-        with ha_stopped():
-            # Backup current registry
-            backup_file(ENTITY_REGISTRY)
+    def _overwrite(_fresh_data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        # Full restore replaces the registry wholesale with the backup.
+        logger.info("✓ Restored %s entities from backup", backup_entity_count)
+        return backup_data, backup_entity_count
 
-            # Write via save_json for atomic rename + permission preservation
-            save_json(ENTITY_REGISTRY, backup_data)
-            logger.info("✓ Restored %s entities from backup", backup_entity_count)
-            return backup_entity_count
-    except (RuntimeError, OSError, ValueError) as e:
-        logger.info("⚠️  Full restore failed: %s", e)
-        return 0
+    return _restore_with_ha_stopped(_overwrite)
 
 
 def _print_backup_list(backups: list[BackupInfo]) -> None:
@@ -1636,7 +1690,22 @@ def restore_menu() -> None:
 
         if _dispatch_restore_action(choice, cached_backups, dry_run):
             cached_backups = None
-            invalidate_cache()
+
+
+def _is_address_or_port_tail(base_id: str, tail: str) -> bool:
+    """Check whether the numeric tail is part of an address or a port number.
+
+    A MAC tail is a two-hex-digit group following another (`..._01_da_12`); a
+    port is a number straight after `tcp` or `udp` (`..._dns_udp_53`). Network
+    integrations produce plenty of both, and they look like duplicate suffixes.
+    """
+    previous_segment = base_id.rsplit("_", 1)[-1] if "_" in base_id else ""
+    if (
+        MAC_TAIL_SEGMENT_PATTERN.match(tail)
+        and MAC_TAIL_SEGMENT_PATTERN.match(previous_segment)
+    ):
+        return True
+    return bool(PORT_SUFFIX_BASE_PATTERN.search(base_id))
 
 
 def find_suffix_entities() -> list[tuple[str, str, str]]:
@@ -1644,9 +1713,9 @@ def find_suffix_entities() -> list[tuple[str, str, str]]:
 
     Returns list of tuples: (old_id, new_id, platform)
 
-    Note: This returns ALL entities ending with _N where N >= 2.
-    User must manually select which ones to fix, as some are legitimate
-    (e.g., button_4, sim_2, pm2_5).
+    Candidates end in `_2`-`_99`, have no entity holding the base ID, no
+    `<base>_1` sibling, and no MAC or port tail. Survivors can still be
+    legitimate (button_4, pm2_5), so the caller confirms each one.
     """
     if not ENTITY_REGISTRY.exists():
         return []
@@ -1656,7 +1725,7 @@ def find_suffix_entities() -> list[tuple[str, str, str]]:
     except (FileNotFoundError, ValueError):
         return []
 
-    entities = data.get("data", {}).get("entities", [])
+    entities = _records(data, "entities")
 
     # Build set of all entity IDs for quick lookup
     all_entity_ids = {e.get("entity_id", "") for e in entities}
@@ -1678,6 +1747,14 @@ def find_suffix_entities() -> list[tuple[str, str, str]]:
 
         # Only include if base entity does NOT exist
         if new_id in all_entity_ids:
+            continue
+
+        # A `<base>_1` sibling means the device numbered these itself, since
+        # Home Assistant never emits `_1`.
+        if f"{new_id}_1" in all_entity_ids:
+            continue
+
+        if _is_address_or_port_tail(new_id, match.group(1)):
             continue
 
         candidates.append((entity_id, new_id, platform))

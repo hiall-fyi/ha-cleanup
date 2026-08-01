@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.7.1] — 2026-08-01
+
+**Fixes only, no new features or behaviour changes to the menu.**
+
+### Bug Fixes
+
+- **Fixed scripts defined in `scripts.yaml` being reported as orphaned.** If you keep scripts in `scripts.yaml`, where each entry is keyed by its own name rather than carrying an `id:` field, the tool found no definitions in that file and listed every one of those scripts as an orphan. Running the orphan cleanup would then have deleted working scripts from your registry while Home Assistant still had them loaded and running. Both styles are now recognised. This is the same problem as the automations one fixed in v1.0.1, which only covered automations and left scripts and scenes behind. If you have run an orphan cleanup on a setup like this, option 7 restores your entity registry from the backup the tool takes before every change.
+- **Fixed a damaged backup file crashing the tool out of the restore menu.** If any file in `.storage` had a `.backup.` name but a truncated or hand-edited registry inside it (specifically, an entity list written as `null`), opening the restore menu ended in a Python traceback and dropped you back to the shell. The tool meant to skip files like these all along, it just didn't recognise this particular kind of damage. Damaged backups are now listed as skipped, the rest of your backups still appear, and Full Restore refuses a damaged file instead of failing part-way through.
+- **Fixed a cancelled suffix fix affecting the operations you ran afterwards.** Registry files were cached in memory for the length of a session. If a suffix fix got as far as renaming entities but never saved (you answered `n` at the confirmation, or the disk filled up), the abandoned rename stayed in that cache, and any cleanup you ran next made its decisions against entity IDs that were never written to disk. Every read now comes from the file itself, so a cancelled operation leaves no trace.
+- **Fixed reported disk savings being larger than the space actually freed.** After a purge, the tool compared the database file before and after and told you how much it had reclaimed. In WAL mode the freed pages sit in a `-wal` sidecar file until they're folded back in, so a purge could report dropping from 5920 MB to 2748 MB while the folder still held the original amount. The purge now folds the sidecar back in before measuring, and the reported size counts the sidecar files, so the number matches what your disk shows.
+- **Fixed the tool permanently switching your database to WAL journalling.** The purge switched journal mode to WAL for speed and never switched it back. Unlike the other performance settings it adjusts, this one is stored inside the database file, so it persisted after the tool exited. If your database was in `delete` mode it now goes back to `delete` mode afterwards. Databases already in WAL, which is Home Assistant's own default, are left alone.
+- **Fixed the purge leaving broken internal references behind.** Home Assistant's `states` table links each row to the state that preceded it. Deleting old rows without clearing those links left surviving rows pointing at rows that no longer existed, so a database integrity check would report errors on a database this tool had just called clean. Old links are now cleared before the rows are removed, matching what Home Assistant's own purge does.
+
+### Improvements
+
+- **Numeric suffix detection no longer buries real duplicates under false positives.** Model numbers (`sensor.solar_5000`, `sensor.inverter_2400`), MAC addresses (`device_tracker.athena_clients_0c_80_2f_01_da_12`) and firewall port numbers (`switch.block_dns_udp_53`) were all offered as suffix candidates alongside genuine duplicates. Home Assistant's own numbering counts `_2`, `_3` and upwards and never reaches those, so detection is now limited to that range, skips a numeric tail that continues a MAC address, skips a number directly after `tcp` or `udp`, and treats a run like `sensor.relay_1`, `sensor.relay_2` as the device's own numbering. On a 2223-entity registry this took the candidate list from 45 down to 8, with all 37 removed being false positives. Selection is still manual, with the same warning, since genuine suffixes such as `button_4` or `pm2_5` remain impossible to tell apart automatically. Originally reported by @hapklaar in [#2](https://github.com/hiall-fyi/ha-cleanup/issues/2).
+- **Selective restore handles a full disk properly.** A disk-full error during a selective restore now returns you to the menu with a clean message, instead of dropping out of the tool with a raw error.
+- **Reporting a problem is easier.** Bug reports and feature requests now open with a form that asks for the handful of details that speed up a diagnosis, instead of a blank box.
+- **Internal tidy-up.** Consolidated duplicated batch-delete and restore logic into shared helpers, removed the registry cache described above, and dropped a few rough edges a code audit turned up. The test suite grew from 86 to 115 tests, and the database purge is now covered end to end rather than only helper by helper.
+
+---
+
 ## [1.7.0] — 2026-06-14
 
 **Restore preview & audit hardening release**

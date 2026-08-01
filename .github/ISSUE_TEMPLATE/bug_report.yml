@@ -1,0 +1,111 @@
+name: Bug report
+description: Something in HA Cleanup isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. A few details up front save a
+        lot of back-and-forth. The most useful thing you can include is the
+        output of a dry run, which is read-only and safe to share.
+  - type: checkboxes
+    attributes:
+      label: Before you start
+      options:
+        - label: I have searched the existing issues and discussions for this
+          required: true
+  - type: input
+    id: tool_version
+    attributes:
+      label: HA Cleanup version
+      description: Shown in the menu header when you start the tool.
+      placeholder: e.g. 1.7.1
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      placeholder: e.g. 2026.7.4
+    validations:
+      required: true
+  - type: input
+    id: python_version
+    attributes:
+      label: Python version
+      description: Run `python3 --version` on the machine you run the tool from.
+      placeholder: e.g. 3.13.2
+    validations:
+      required: true
+  - type: dropdown
+    id: install_type
+    attributes:
+      label: Home Assistant installation type
+      options:
+        - HA OS
+        - Container
+        - Supervised
+        - Core
+    validations:
+      required: true
+  - type: dropdown
+    id: menu_option
+    attributes:
+      label: Which menu option were you running?
+      options:
+        - "1. Full cleanup"
+        - "2. Remove orphaned entities"
+        - "3. Clean deleted registry items"
+        - "4. Purge old database records"
+        - "5. Fix numeric suffix"
+        - "6. Clean old backup files"
+        - "7. Restore from backup"
+        - "d. Dry run"
+        - "--dry-run on the command line"
+        - Not sure / something else
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened?
+      description: If you got a Python traceback, paste the whole thing here.
+    validations:
+      required: true
+  - type: textarea
+    id: dry_run_output
+    attributes:
+      label: Dry-run output
+      description: >
+        Not required, but it's the fastest route to a diagnosis. Run
+        `python3 ha-cleanup.py --dry-run`, which only reads and never modifies
+        anything, and paste the relevant part. Entity IDs are fine to redact if
+        any are sensitive.
+      render: text
+  - type: markdown
+    attributes:
+      value: |
+        **If the tool changed something you didn't want:** it backs up every
+        registry file before writing, as `core.entity_registry.backup.<timestamp>`
+        in your `.storage` folder. Option 7 restores from those, and mentioning
+        which backup you have makes it easier to advise.
+  - type: input
+    id: db_size
+    attributes:
+      label: Database size, if the problem involves the purge
+      description: Shown in the menu header.
+      placeholder: e.g. 5920 MB
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce (if you can)
+  - type: textarea
+    id: already_tried
+    attributes:
+      label: What have you already tried?
