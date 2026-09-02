@@ -57,9 +57,10 @@ body:
         - "2. Remove orphaned entities"
         - "3. Clean deleted registry items"
         - "4. Purge old database records"
-        - "5. Fix numeric suffix"
+        - "5. Remove orphaned long-term statistics"
         - "6. Clean old backup files"
-        - "7. Restore from backup"
+        - "7. Fix numeric suffix"
+        - "8. Restore from backup"
         - "d. Dry run"
         - "--dry-run on the command line"
         - Not sure / something else
@@ -93,7 +94,7 @@ body:
       value: |
         **If the tool changed something you didn't want:** it backs up every
         registry file before writing, as `core.entity_registry.backup.<timestamp>`
-        in your `.storage` folder. Option 7 restores from those, and mentioning
+        in your `.storage` folder. Option 8 restores from those, and mentioning
         which backup you have makes it easier to advise.
   - type: input
     id: db_size

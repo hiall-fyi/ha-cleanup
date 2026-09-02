@@ -4,13 +4,42 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.8.0] — 2026-09-02
+
+**Scheduled runs release**
+
+### Breaking Changes
+
+- **Menu options 5, 7 and 8 have changed to make room for the new statistics cleanup, though option 6 hasn't moved.** If you know the v1.7.1 menu from memory, or you're working from an old screenshot or forum post, here's what's different:
+
+  | Option | What it does | Changed? |
+  |--------|---------------|----------|
+  | 5 | Remove orphaned long-term statistics | New |
+  | 6 | Clean old backup files | No — same as before |
+  | 7 | Fix numeric suffix (interactive) | Was option 5 |
+  | 8 | Restore from backup (interactive) | Was option 7 |
+
+  Options 1-4 haven't moved.
+
+### Features
+
+- **Options 1-4, 5 and 6 can now run unattended, for a cron job or systemd timer.** `--run=<option> --yes` skips the confirmation prompt and runs that one option non-interactively, exiting non-zero if anything failed so cron notices. Options 7 and 8 need you to pick specific entities or a backup, so they're rejected with an explanation rather than run unattended. `--dry-run` combines with `--run` to preview a single option instead of everything. Originally requested by @comet424 in [Discussion #3](https://github.com/hiall-fyi/ha-cleanup/discussions/3).
+- **New option removes orphaned long-term statistics.** Deleting an entity, or the integration behind it, has never cleared its old statistics from the database — the hourly and 5-minute history stays behind under an entity ID nothing points to any more. Option 5 finds and removes it, leaving external statistics (utility meter helpers, energy-dashboard cost sensors) alone, since those were never tied to a live entity in the first place. It also leaves alone anything still writing new statistics within the last 7 days, in case it's a live YAML sensor with no registry entry. It's its own menu option, not folded into Full Cleanup, so it only runs when you ask for it. Flagged by @AberDino, who spotted it via the Spook integration, in [Discussion #4](https://github.com/hiall-fyi/ha-cleanup/discussions/4).
+
+### Bug Fixes
+
+- **Fixed the dry-run preview not printing the summary block the README already documented.** Pressing `d` (or running `--dry-run`) listed each category's own preview lines but never added the counts up: orphaned entities, deleted registry items, database purge counts, suffix fixes, old backups. It now logs a `Summary:` block afterwards with one count per category, matching what the README's Dry Run Preview section showed all along.
+- **Fixed the suffix-fix reminder appearing after a cleanup that never ran.** Option 1 printed its "run option 7 separately" reminder every time, even if you'd declined the "stop Home Assistant" prompt or one of the three cleanup steps had failed partway through. It now only prints when the cleanup actually succeeded.
+
+---
+
 ## [1.7.1] — 2026-08-01
 
 **Fixes only, no new features or behaviour changes to the menu.**
 
 ### Bug Fixes
 
-- **Fixed scripts defined in `scripts.yaml` being reported as orphaned.** If you keep scripts in `scripts.yaml`, where each entry is keyed by its own name rather than carrying an `id:` field, the tool found no definitions in that file and listed every one of those scripts as an orphan. Running the orphan cleanup would then have deleted working scripts from your registry while Home Assistant still had them loaded and running. Both styles are now recognised. This is the same problem as the automations one fixed in v1.0.1, which only covered automations and left scripts and scenes behind. If you have run an orphan cleanup on a setup like this, option 7 restores your entity registry from the backup the tool takes before every change.
+- **Fixed scripts defined in `scripts.yaml` being reported as orphaned.** If you keep scripts in `scripts.yaml`, where each entry is keyed by its own name rather than carrying an `id:` field, the tool found no definitions in that file and listed every one of those scripts as an orphan. Running the orphan cleanup would then have deleted working scripts from your registry while Home Assistant still had them loaded and running. Both styles are now recognised. This is the same problem as the automations one fixed in v1.0.1, which only covered automations and left scripts and scenes behind. If you have run an orphan cleanup on a setup like this, option 7 (now option 8) restores your entity registry from the backup the tool takes before every change.
 - **Fixed a damaged backup file crashing the tool out of the restore menu.** If any file in `.storage` had a `.backup.` name but a truncated or hand-edited registry inside it (specifically, an entity list written as `null`), opening the restore menu ended in a Python traceback and dropped you back to the shell. The tool meant to skip files like these all along, it just didn't recognise this particular kind of damage. Damaged backups are now listed as skipped, the rest of your backups still appear, and Full Restore refuses a damaged file instead of failing part-way through.
 - **Fixed a cancelled suffix fix affecting the operations you ran afterwards.** Registry files were cached in memory for the length of a session. If a suffix fix got as far as renaming entities but never saved (you answered `n` at the confirmation, or the disk filled up), the abandoned rename stayed in that cache, and any cleanup you ran next made its decisions against entity IDs that were never written to disk. Every read now comes from the file itself, so a cancelled operation leaves no trace.
 - **Fixed reported disk savings being larger than the space actually freed.** After a purge, the tool compared the database file before and after and told you how much it had reclaimed. In WAL mode the freed pages sit in a `-wal` sidecar file until they're folded back in, so a purge could report dropping from 5920 MB to 2748 MB while the folder still held the original amount. The purge now folds the sidecar back in before measuring, and the reported size counts the sidecar files, so the number matches what your disk shows.

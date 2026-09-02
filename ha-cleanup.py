@@ -8,16 +8,20 @@ Features:
   - Fix numeric suffix issues (_2, _3, etc.) on entity IDs
   - Clean deleted_entities and deleted_devices from registries
   - Purge old states/events and vacuum database
+  - Remove orphaned long-term statistics (entity no longer exists)
   - Restore entities from backup files (selective or full restore)
   - Auto-detects recorder purge_keep_days from HA config
   - Auto-detects config path (HAOS, Docker, Core)
 
 Usage:
-  python3 ha-cleanup.py              # Interactive menu
-  python3 ha-cleanup.py --dry-run    # Preview all changes
+  python3 ha-cleanup.py                    # Interactive menu
+  python3 ha-cleanup.py --dry-run          # Preview all changes
+  python3 ha-cleanup.py --run=3 --yes      # Run one option unattended (cron)
+  python3 ha-cleanup.py --run=3 --dry-run  # Preview one option
 """
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
 import logging
@@ -37,7 +41,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
-VERSION = "1.7.1"
+VERSION = "1.8.0"
 
 # Configure logging
 logging.basicConfig(
@@ -101,6 +105,11 @@ BATCH_THRESHOLD_LARGE = 1_000_000   # rows — switch from MEDIUM to LARGE
 # Database purge — SQLite PRAGMA optimization
 PRAGMA_CACHE_SIZE = -64_000       # 64 MB cache (negative = KiB)
 PRAGMA_MMAP_SIZE = 268_435_456    # 256 MB memory-mapped I/O
+
+STATISTICS_ID_CHUNK_SIZE = 500  # stay well under SQLite's bound-parameter limit
+# Real orphans in testing were 37.8-1017h old; a live sensor gets an hourly
+# statistics row regardless of value, so 7 days safely covers both sides.
+STATISTICS_RECENCY_GUARD_DAYS = 7
 
 # Database purge — VACUUM
 VACUUM_SPACE_SAFETY_MARGIN = 1.1          # 10% safety margin
@@ -574,6 +583,22 @@ def _is_entity_orphan(
     return bool(valid_ids is not None and unique_id and unique_id not in valid_ids)
 
 
+def _live_entity_ids() -> set[str]:
+    """Return every entity_id currently present in the entity registry.
+
+    Returns an empty set if the registry is missing or unparseable, same as
+    a genuinely empty registry. Callers where that distinction matters (e.g.
+    a whitelist check) must check ENTITY_REGISTRY themselves first.
+    """
+    if not ENTITY_REGISTRY.exists():
+        return set()
+    try:
+        data = load_json(ENTITY_REGISTRY)
+    except (FileNotFoundError, ValueError):
+        return set()
+    return {e.get("entity_id", "") for e in _records(data, "entities")}
+
+
 def find_orphaned_entities() -> list[tuple[str, str, str]]:
     """Find entities with missing device, config_entry, or definition.
 
@@ -649,6 +674,136 @@ def cleanup_orphaned_entities(dry_run: bool = False) -> int:
     save_json(ENTITY_REGISTRY, data)
     logger.info("✓ Removed %s orphaned entities", original_count - new_count)
     return original_count - new_count
+
+
+def find_orphaned_statistics() -> list[tuple[int, str]]:
+    """Find statistics_meta rows whose entity no longer exists.
+
+    Only `source == "recorder"` rows are candidates — external stats
+    (utility_meter, energy-dashboard cost sensors) use a different id shape
+    and are never touched.
+
+    Registry-absence alone isn't proof of deletion: HA only registers
+    entities with a `unique_id`, so a unique_id-less YAML sensor is live but
+    never appears in the registry. A registry-absent candidate is only
+    orphaned if it also has no `statistics` row newer than
+    STATISTICS_RECENCY_GUARD_DAYS.
+
+    Returns list of (metadata_id, statistic_id) pairs.
+    """
+    if not DB_PATH.exists():
+        return []
+
+    # _live_entity_ids() returns set() on a missing/corrupt registry too,
+    # indistinguishable from a genuinely empty one — check first.
+    if not ENTITY_REGISTRY.exists():
+        logger.info("⚠️  Entity registry not found, skipping orphan detection")
+        return []
+    try:
+        load_json(ENTITY_REGISTRY)
+    except (FileNotFoundError, ValueError) as e:
+        logger.info("⚠️  Error loading registry files: %s", e)
+        return []
+
+    live_ids = _live_entity_ids()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.execute(
+            "SELECT id, statistic_id FROM statistics_meta WHERE source = 'recorder'",
+        )
+        candidates = [
+            (metadata_id, statistic_id)
+            for metadata_id, statistic_id in cur.fetchall()
+            if statistic_id not in live_ids
+        ]
+        if not candidates:
+            return candidates
+
+        cutoff_ts = (
+            datetime.now(tz=None)  # noqa: DTZ005 — local time intentional
+            - timedelta(days=STATISTICS_RECENCY_GUARD_DAYS)
+        ).timestamp()
+        recent_ids: set[int] = set()
+        candidate_ids = [metadata_id for metadata_id, _statistic_id in candidates]
+        for start in range(0, len(candidate_ids), STATISTICS_ID_CHUNK_SIZE):
+            chunk = candidate_ids[start:start + STATISTICS_ID_CHUNK_SIZE]
+            placeholders = ",".join("?" * len(chunk))
+            try:
+                rows = conn.execute(
+                    f"SELECT metadata_id, MAX(start_ts) FROM statistics "
+                    f"WHERE metadata_id IN ({placeholders}) GROUP BY metadata_id",
+                    chunk,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                continue  # pre-v31 schema has no start_ts column; no recency signal for this chunk
+            # A candidate with no `statistics` rows never appears here (GROUP
+            # BY has nothing to group), so it stays orphaned rather than
+            # reading NULL as "recent". `is not None` guards against a NULL
+            # MAX ever slipping through — must not crash the `>`.
+            recent_ids.update(
+                metadata_id
+                for metadata_id, max_start_ts in rows
+                if max_start_ts is not None and max_start_ts > cutoff_ts
+            )
+
+        return [
+            (metadata_id, statistic_id)
+            for metadata_id, statistic_id in candidates
+            if metadata_id not in recent_ids
+        ]
+    finally:
+        conn.close()
+
+
+def cleanup_orphaned_statistics(dry_run: bool = False) -> int:
+    """Remove long-term statistics for entities that no longer exist.
+
+    Deletes children (statistics, statistics_short_term) before the parent
+    (statistics_meta) — the schema's ON DELETE CASCADE never fires because
+    this tool's connections don't set PRAGMA foreign_keys=ON.
+    """
+    if not DB_PATH.exists():
+        logger.info("✓ No database found, skipping")
+        return 0
+
+    orphans = find_orphaned_statistics()
+
+    if not orphans:
+        logger.info("✓ No orphaned statistics found")
+        return 0
+
+    if dry_run:
+        logger.info("Found %s orphaned statistics:", len(orphans))
+        for _metadata_id, statistic_id in sorted(orphans, key=lambda o: o[1]):
+            logger.info("  - %s", statistic_id)
+        return len(orphans)
+
+    metadata_ids = [metadata_id for metadata_id, _statistic_id in orphans]
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            originals = _configure_pragmas(conn)
+            try:
+                cur = conn.cursor()
+                db = _DbCtx(cur=cur, conn=conn)
+
+                for table in ("statistics", "statistics_short_term"):
+                    t = _log_phase_start(f"Orphan {table}")
+                    deleted = _delete_by_metadata_ids(db, table, metadata_ids)
+                    _log_phase_end(f"Orphan {table}", t, f"deleted {deleted:,} rows")
+
+                meta_deleted = _delete_statistics_meta(db, metadata_ids)
+            finally:
+                _restore_pragmas(conn, originals)
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        logger.info("⚠️  Database error: %s", e)
+        return 0
+
+    logger.info("✓ Removed %s orphaned statistics", meta_deleted)
+    return meta_deleted
 
 
 def cleanup_deleted_items(dry_run: bool = False) -> int:
@@ -925,6 +1080,55 @@ def _batch_delete_table(
         ")"
     )
     return _run_batched_delete(db, sql, (cutoff_ts,), total, batch_size)
+
+
+def _delete_by_metadata_ids(
+    db: _DbCtx,
+    table: str,
+    metadata_ids: list[int],
+) -> int:
+    """Batch-delete all rows in `table` whose metadata_id is in metadata_ids.
+
+    Chunks the id list to stay under SQLite's bound-parameter limit, reusing
+    _run_batched_delete's rowid+LIMIT loop per chunk.
+    """
+    total_deleted = 0
+    for start in range(0, len(metadata_ids), STATISTICS_ID_CHUNK_SIZE):
+        chunk = metadata_ids[start:start + STATISTICS_ID_CHUNK_SIZE]
+        placeholders = ",".join("?" * len(chunk))
+        db.cur.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE metadata_id IN ({placeholders})",
+            chunk,
+        )
+        total: int = db.cur.fetchone()[0]
+        if not total:
+            continue
+        sql = (
+            f"DELETE FROM {table} WHERE rowid IN ("
+            f"  SELECT rowid FROM {table}"
+            f"  WHERE metadata_id IN ({placeholders})"
+            f"  LIMIT ?"
+            ")"
+        )
+        total_deleted += _run_batched_delete(
+            db, sql, tuple(chunk), total, _get_batch_size(total),
+        )
+    return total_deleted
+
+
+def _delete_statistics_meta(db: _DbCtx, metadata_ids: list[int]) -> int:
+    """Delete statistics_meta rows by id, chunked. Call only after children."""
+    deleted = 0
+    for start in range(0, len(metadata_ids), STATISTICS_ID_CHUNK_SIZE):
+        chunk = metadata_ids[start:start + STATISTICS_ID_CHUNK_SIZE]
+        placeholders = ",".join("?" * len(chunk))
+        db.cur.execute(
+            f"DELETE FROM statistics_meta WHERE id IN ({placeholders})",
+            chunk,
+        )
+        deleted += db.cur.rowcount
+        db.conn.commit()
+    return deleted
 
 
 def _cleanup_orphans(
@@ -1940,9 +2144,10 @@ def print_menu() -> None:
     print("  2. Remove orphaned entities (missing device/config/definition)")
     print("  3. Clean deleted registry items (deleted_entities/devices)")
     print("  4. Purge old database records (optimised batch + progress)")
-    print("  5. Fix numeric suffix (_2, _3, etc.) - interactive")
+    print("  5. Remove orphaned long-term statistics (entity no longer exists)")
     print(f"  6. Clean old backup files (>{BACKUP_RETENTION_DAYS} days)")
-    print("  7. Restore from backup (selective or full)")
+    print("  7. Fix numeric suffix (_2, _3, etc.) - interactive")
+    print("  8. Restore from backup (selective or full)")
     print()
     print("  d. Dry run (preview all)")
     print("  q. Quit")
@@ -1961,18 +2166,24 @@ def confirm_action(msg: str) -> bool:
 def run_with_ha_restart(
     operations: list[Callable[..., object]],
     dry_run: bool = False,
-) -> None:
-    """Run operations that require HA restart."""
+    yes: bool = False,
+) -> bool:
+    """Run operations that require HA restart.
+
+    Returns True iff every operation succeeds. `yes=True` skips only this
+    function's own confirmation, never ha_stopped()'s manual-fallback prompt.
+    """
     if dry_run:
         for op in operations:
             op(dry_run=True)
-        return
+        return True
 
-    if not confirm_action("This will stop Home Assistant. Continue?"):
+    if not yes and not confirm_action("This will stop Home Assistant. Continue?"):
         print("Aborted.")
-        return
+        return False
 
     db_before = get_db_size()
+    success = True
 
     logger.info("Stopping Home Assistant...")
     try:
@@ -1982,6 +2193,7 @@ def run_with_ha_restart(
                     op(dry_run=False)
                 except (OSError, ValueError, sqlite3.Error) as e:
                     logger.info("⚠️  Error in %s: %s", op.__name__, e)
+                    success = False
             cleanup_old_backups()
 
             db_after = get_db_size()
@@ -1993,20 +2205,39 @@ def run_with_ha_restart(
                         db_before, db_after, saved,
                     )
     except RuntimeError:
-        return
+        return False
 
     logger.info("Done!")
+    return success
 
 
 def _run_dry_run_preview() -> None:
-    print("\n" + "=" * 70)
-    logger.info("DRY RUN - Preview all changes")
-    print("=" * 70 + "\n")
-    cleanup_orphaned_entities(dry_run=True)
-    cleanup_deleted_items(dry_run=True)
-    purge_database(dry_run=True)
-    fix_entity_suffix(dry_run=True)
-    cleanup_old_backups(dry_run=True)
+    """Preview all changes without applying them, with an aggregate summary."""
+    logger.info("=" * 50)
+    logger.info("Home Assistant Cleanup (DRY RUN)")
+    logger.info("=" * 50)
+    logger.info("Config path: %s", CONFIG_PATH)
+    db_size = get_db_size()
+    if db_size:
+        logger.info("Database size: %s MB", format(db_size, ".1f"))
+
+    orphans = cleanup_orphaned_entities(dry_run=True)
+    deleted = cleanup_deleted_items(dry_run=True)
+    states, events = purge_database(dry_run=True)
+    suffix = fix_entity_suffix(dry_run=True)
+    old_backups = cleanup_old_backups(dry_run=True)
+    orphaned_stats = cleanup_orphaned_statistics(dry_run=True)
+
+    logger.info("%s", "\n" + "=" * 50)
+    logger.info("Summary:")
+    logger.info("  Orphaned entities: %s", orphans)
+    logger.info("  Deleted registry items: %s", deleted)
+    logger.info("  DB states to purge: %s", format(states, ","))
+    logger.info("  DB events to purge: %s", format(events, ","))
+    logger.info("  Suffix fixes: %s", suffix)
+    logger.info("  Old backup files: %s", old_backups)
+    logger.info("  Orphaned statistics: %s", orphaned_stats)
+    logger.info("=" * 50)
 
 
 def _run_suffix_fix() -> None:
@@ -2030,6 +2261,37 @@ def _run_suffix_fix() -> None:
     logger.info("Done!")
 
 
+def _run_choice(choice: str, *, yes: bool = False, dry_run: bool = False) -> bool:
+    """Run one automatable menu choice. Returns True on success.
+
+    Raises ValueError for "7"/"8" or any unrecognised choice.
+    """
+    if choice == "1":
+        ok = run_with_ha_restart(
+            [cleanup_orphaned_entities, cleanup_deleted_items, purge_database],
+            dry_run=dry_run, yes=yes,
+        )
+        if ok:
+            print("\n⚠️  Suffix fix requires manual selection. Run option 7 separately.")
+        return ok
+    if choice == "2":
+        return run_with_ha_restart([cleanup_orphaned_entities], dry_run=dry_run, yes=yes)
+    if choice == "3":
+        return run_with_ha_restart([cleanup_deleted_items], dry_run=dry_run, yes=yes)
+    if choice == "4":
+        return run_with_ha_restart([purge_database], dry_run=dry_run, yes=yes)
+    if choice == "5":
+        return run_with_ha_restart(
+            [cleanup_orphaned_statistics], dry_run=dry_run, yes=yes,
+        )
+    if choice == "6":
+        cleanup_old_backups(dry_run=dry_run)
+        return True
+    raise ValueError(
+        f"Option {choice} requires interactive selection and can't be automated.",
+    )
+
+
 def interactive_menu() -> None:
     """Run interactive menu loop."""
     while True:
@@ -2045,24 +2307,11 @@ def interactive_menu() -> None:
             break
         if choice == "d":
             _run_dry_run_preview()
-        elif choice == "1":
-            run_with_ha_restart([
-                cleanup_orphaned_entities,
-                cleanup_deleted_items,
-                purge_database,
-            ])
-            print("\n⚠️  Suffix fix requires manual selection. Run option 5 separately.")
-        elif choice == "2":
-            run_with_ha_restart([cleanup_orphaned_entities])
-        elif choice == "3":
-            run_with_ha_restart([cleanup_deleted_items])
-        elif choice == "4":
-            run_with_ha_restart([purge_database])
-        elif choice == "5":
-            _run_suffix_fix()
-        elif choice == "6":
-            cleanup_old_backups()
+        elif choice in {"1", "2", "3", "4", "5", "6"}:
+            _run_choice(choice)
         elif choice == "7":
+            _run_suffix_fix()
+        elif choice == "8":
             restore_menu()
         else:
             print("Invalid option, try again.")
@@ -2072,31 +2321,45 @@ def interactive_menu() -> None:
 # Main Entry Point
 # ============================================================
 
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser for non-interactive use."""
+    parser = argparse.ArgumentParser(
+        prog="ha-cleanup.py",
+        description="Home Assistant Cleanup Tool.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Preview changes without applying them.",
+    )
+    parser.add_argument(
+        "--run", choices=[str(n) for n in range(1, 9)],
+        help=(
+            "Run one menu option non-interactively (needs --yes, unless "
+            "combined with --dry-run). Options 7 and 8 need interactive "
+            "selection and are rejected."
+        ),
+    )
+    parser.add_argument(
+        "--yes", action="store_true",
+        help="Skip the confirmation prompt when using --run. Ignored otherwise.",
+    )
+    return parser
+
+
 def main() -> None:
     """Run the main entry point."""
-    if "--dry-run" in sys.argv:
-        logger.info("=" * 50)
-        logger.info("Home Assistant Cleanup (DRY RUN)")
-        logger.info("=" * 50)
-        logger.info("Config path: %s", CONFIG_PATH)
-        db_size = get_db_size()
-        if db_size:
-            logger.info("Database size: %s MB\n", format(db_size, ".1f"))
-        orphans = cleanup_orphaned_entities(dry_run=True)
-        deleted = cleanup_deleted_items(dry_run=True)
-        states, events = purge_database(dry_run=True)
-        suffix = fix_entity_suffix(dry_run=True)
-        old_backups = cleanup_old_backups(dry_run=True)
+    args = _build_arg_parser().parse_args()
 
-        logger.info("%s", "\n" + "=" * 50)
-        logger.info("Summary:")
-        logger.info("  Orphaned entities: %s", orphans)
-        logger.info("  Deleted registry items: %s", deleted)
-        logger.info("  DB states to purge: %s", format(states, ","))
-        logger.info("  DB events to purge: %s", format(events, ","))
-        logger.info("  Suffix fixes: %s", suffix)
-        logger.info("  Old backup files: %s", old_backups)
-        logger.info("=" * 50)
+    if args.run:
+        try:
+            ok = _run_choice(args.run, yes=args.yes, dry_run=args.dry_run)
+        except ValueError as e:
+            # Not a bug — an invalid --run choice, not a traceback-worthy crash.
+            logger.error("%s", e)  # noqa: TRY400
+            sys.exit(2)
+        sys.exit(0 if ok else 1)
+    elif args.dry_run:
+        _run_dry_run_preview()
     else:
         interactive_menu()
 
