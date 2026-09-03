@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.8.1] — 2026-09-03
+
+### Bug Fixes
+
+- **Fixed unattended cleanup always failing when triggered from Home Assistant's own `shell_command:`.** Options 1-4 and 5 need to stop Home Assistant before they touch the registry or database, and `shell_command:` runs inside HA Core's own container, which has none of `ha`, `systemctl` or `docker` available to it. The automatic stop always failed there, and the tool fell back to a manual confirmation prompt that nothing could ever answer, so it aborted with no explanation reaching the log. It now names the actual reason instead, and that reason reaches the log (or `response_variable`) rather than being silently dropped. Reported by @comet424 in [Discussion #3](https://github.com/hiall-fyi/ha-cleanup/discussions/3), traced from the debug log they captured. Options 1-4 and 5 still need a real cron job, systemd timer, or an add-on's own scheduler running outside Home Assistant's container; only option 6 is safe to trigger from `shell_command:` directly, and the README's Scheduled / Non-Interactive Runs section says so now.
+
+---
+
 ## [1.8.0] — 2026-09-02
 
 **Scheduled runs release**

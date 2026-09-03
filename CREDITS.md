@@ -8,6 +8,10 @@ HA Cleanup is shaped by real user reports. This page recognises everyone who has
 
 Community members who helped shape each release through bug reports, feature requests, and testing.
 
+### v1.8.1
+
+- **[@comet424](https://github.com/comet424)** — Reported unattended cleanup failing every time it ran from a Home Assistant `shell_command:` ([Discussion #3](https://github.com/hiall-fyi/ha-cleanup/discussions/3)), with a debug log that traced straight to the cause: that trigger runs inside HA Core's own container, which can't stop HA itself.
+
 ### v1.8.0
 
 - **[@comet424](https://github.com/comet424)** — Requested a way to run cleanup unattended from a scheduler ([Discussion #3](https://github.com/hiall-fyi/ha-cleanup/discussions/3)), which shipped as `--run=<option> --yes`. Also reported the script disappearing after Home Assistant updates, tracked down to being saved inside an SSH add-on's own container rather than `/config`.

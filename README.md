@@ -6,7 +6,7 @@
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.6+-blue?style=for-the-badge&logo=home-assistant) ![Python](https://img.shields.io/badge/Python-3.13+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 
 <!-- Status Badges -->
-![Version](https://img.shields.io/badge/Version-1.8.0-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.8.1-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
 
 <!-- Community Badges -->
 ![GitHub stars](https://img.shields.io/github/stars/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub forks](https://img.shields.io/github/forks/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub issues](https://img.shields.io/github/issues/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub last commit](https://img.shields.io/github/last-commit/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github)
@@ -88,7 +88,7 @@ python3 ha-cleanup.py
 
 ```
 ======================================================================
-  Home Assistant Cleanup Tool  v1.8.0
+  Home Assistant Cleanup Tool  v1.8.1
 ======================================================================
   Config: /homeassistant
   Database: 5938.4 MB
@@ -215,17 +215,27 @@ python3 ha-cleanup.py --run=3 --dry-run
 0 4 * * 0 cd /path/to/config && python3 ha-cleanup.py --run=3 --yes >> /var/log/ha-cleanup.log 2>&1
 ```
 
-**From within Home Assistant**, using `shell_command:` plus your own
-automation trigger:
+**Options 1-4 and 5 need to stop Home Assistant, so they need to run from
+somewhere that actually can stop it**: a host-level cron job or systemd
+timer, as above, or a scheduler add-on that runs outside HA's own container
+(the SSH & Terminal add-on's own cron, for example). Home Assistant's
+`shell_command:` runs *inside* HA Core's own container, and that container
+has none of `ha`, `systemctl` or `docker` available to it. Every way this
+tool tries to stop HA fails from in there, so options 1-4 and 5 triggered
+this way always abort with "Could not stop HA automatically", whatever you
+pass on the command line.
+
+**Option 6 doesn't stop HA at all**, so it's the one that's actually safe to
+trigger from `shell_command:`:
 
 ```yaml
 shell_command:
-  ha_cleanup_deleted_items: "python3 /path/to/ha-cleanup.py --run=3 --yes"
+  ha_cleanup_old_backups: "python3 /path/to/ha-cleanup.py --run=6 --yes"
 ```
 
 ```yaml
 automation:
-  - alias: "Weekly HA Cleanup"
+  - alias: "Weekly Backup Cleanup"
     trigger:
       - platform: time
         at: "04:00:00"
@@ -234,7 +244,7 @@ automation:
         weekday:
           - sun
     action:
-      - action: shell_command.ha_cleanup_deleted_items
+      - action: shell_command.ha_cleanup_old_backups
         response_variable: cleanup_result
       - if: "{{ cleanup_result['returncode'] != 0 }}"
         then:
@@ -952,9 +962,9 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ---
 
-**Version**: 1.8.0  
-**Last Updated**: 2026-09-02  
-**Tested On**: Home Assistant 2026.8.2, `--run=2/3/4 --yes` (and interactively) on a live 5.9 GB database — 49 deleted entities + 4 deleted devices cleaned, 8.4M states + 3M orphan rows purged and VACUUMed (5938.5 → 2839.9 MB), registry and DB integrity verified before/after, HA restarted clean each time. Option 5 tested separately on 2026.8.3, same box: found and removed 4 orphaned statistics (44 long-term rows, left over from a retired device) after confirming all four were genuinely absent from the entity registry, then a follow-up dry run found nothing left, and HA restarted clean.
+**Version**: 1.8.1  
+**Last Updated**: 2026-09-03  
+**Tested On**: Home Assistant 2026.8.2, `--run=2/3/4 --yes` (and interactively) on a live 5.9 GB database — 49 deleted entities + 4 deleted devices cleaned, 8.4M states + 3M orphan rows purged and VACUUMed (5938.5 → 2839.9 MB), registry and DB integrity verified before/after, HA restarted clean each time. Option 5 tested separately on 2026.8.3, same box: found and removed 4 orphaned statistics (44 long-term rows, left over from a retired device) after confirming all four were genuinely absent from the entity registry, then a follow-up dry run found nothing left, and HA restarted clean. The 1.8.1 fix confirmed on that same box's real Python 3.14.7 on 2026-09-03: `sys.stdin.isatty()` reports `False` under a `shell_command:`-style non-interactive invocation, which is what the fix relies on to tell that case apart from a real terminal.
 
 ---
 

@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 
 # Configure logging
 logging.basicConfig(
@@ -373,8 +373,18 @@ def ha_stopped() -> Generator[str | None]:
     method = stop_ha()
     if not method:
         logger.info("⚠️  Could not stop HA automatically.")
-        if not confirm_action("Please stop HA manually. Continue when stopped?"):
-            msg = "HA not stopped — operation aborted"
+        if sys.stdin.isatty():
+            if not confirm_action("Please stop HA manually. Continue when stopped?"):
+                msg = "HA not stopped — operation aborted"
+                raise RuntimeError(msg)
+        else:
+            msg = (
+                "no terminal to confirm a manual stop, and `ha`/`systemctl`/"
+                "`docker` all failed — this usually means ha-cleanup.py was "
+                "triggered by something that can't stop HA itself, such as "
+                "HA's own shell_command:. See the README's Scheduled / "
+                "Non-Interactive Runs section for a trigger that works."
+            )
             raise RuntimeError(msg)
 
     _wait_for_db_unlocked()
@@ -2204,7 +2214,8 @@ def run_with_ha_restart(
                         "Database: %.1f MB → %.1f MB (%.1f MB saved)",
                         db_before, db_after, saved,
                     )
-    except RuntimeError:
+    except RuntimeError as e:
+        logger.info("⚠️  %s", e)
         return False
 
     logger.info("Done!")
