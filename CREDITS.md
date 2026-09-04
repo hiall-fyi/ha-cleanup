@@ -8,6 +8,10 @@ HA Cleanup is shaped by real user reports. This page recognises everyone who has
 
 Community members who helped shape each release through bug reports, feature requests, and testing.
 
+### v1.8.2
+
+- **[@comet424](https://github.com/comet424)** — Reported "Failed to start HA" appearing after a successful cleanup on an Unraid VM ([Discussion #3](https://github.com/hiall-fyi/ha-cleanup/discussions/3)), traced to a shared 60-second timeout too tight for a box still finishing add-on startup. Also worked out (with some AI-assisted troubleshooting) the SSH `bash -lc` and subshell pattern needed to trigger cleanup from Unraid's User Scripts plugin, now documented in the README for anyone else in the same setup.
+
 ### v1.8.1
 
 - **[@comet424](https://github.com/comet424)** — Reported unattended cleanup failing every time it ran from a Home Assistant `shell_command:` ([Discussion #3](https://github.com/hiall-fyi/ha-cleanup/discussions/3)), with a debug log that traced straight to the cause: that trigger runs inside HA Core's own container, which can't stop HA itself.

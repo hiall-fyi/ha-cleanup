@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 
 # Configure logging
 logging.basicConfig(
@@ -94,6 +94,8 @@ ENTITY_COUNT_DIFF_WARNING_THRESHOLD = 50  # Warn if backup differs by >50%
 HA_STOP_WAIT_SECONDS = 2           # Initial grace before probing
 HA_STOP_MAX_WAIT_SECONDS = 30      # Give up probing after this
 HA_STOP_PROBE_INTERVAL = 1.0
+HA_COMMAND_TIMEOUT_SECONDS = 60    # ha/systemctl/docker stop — normally fast
+HA_START_TIMEOUT_SECONDS = 180     # start can block until add-ons finish loading too
 
 # Database purge — adaptive batch sizes
 BATCH_SIZE_SMALL = 10_000      # < 100K rows
@@ -291,14 +293,14 @@ def get_db_size() -> float:
     return total / (1024 * 1024)
 
 
-def _run_ha_command(cmd: list[str]) -> bool:
+def _run_ha_command(cmd: list[str], timeout: int = HA_COMMAND_TIMEOUT_SECONDS) -> bool:
     """Run an HA lifecycle command. Returns True on success.
 
     The cmd list is always a hardcoded literal from stop_ha/start_ha —
     no user input ever reaches subprocess.
     """
     try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=60)  # noqa: S603 — cmd is hardcoded
+        subprocess.run(cmd, check=True, capture_output=True, timeout=timeout)  # noqa: S603 — cmd is hardcoded
     except subprocess.CalledProcessError as e:
         stderr = (e.stderr or b"").decode(errors="replace").strip()
         if stderr:
@@ -323,7 +325,11 @@ def stop_ha() -> str | None:
 
 
 def start_ha(method: str) -> bool:
-    """Start Home Assistant using specified method."""
+    """Start Home Assistant using specified method.
+
+    Uses a longer timeout than stop_ha — `ha core start` can block until
+    add-ons finish loading too, which the stop side never has to wait for.
+    """
     cmds = {
         "ha": ["ha", "core", "start"],
         "systemctl": ["systemctl", "start", "home-assistant@homeassistant"],
@@ -331,7 +337,7 @@ def start_ha(method: str) -> bool:
     }
     if method not in cmds:
         return False
-    return _run_ha_command(cmds[method])
+    return _run_ha_command(cmds[method], timeout=HA_START_TIMEOUT_SECONDS)
 
 
 def _wait_for_db_unlocked() -> None:

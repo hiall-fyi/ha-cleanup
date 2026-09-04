@@ -6,7 +6,7 @@
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.6+-blue?style=for-the-badge&logo=home-assistant) ![Python](https://img.shields.io/badge/Python-3.13+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 
 <!-- Status Badges -->
-![Version](https://img.shields.io/badge/Version-1.8.1-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.8.2-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
 
 <!-- Community Badges -->
 ![GitHub stars](https://img.shields.io/github/stars/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub forks](https://img.shields.io/github/forks/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub issues](https://img.shields.io/github/issues/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) ![GitHub last commit](https://img.shields.io/github/last-commit/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github)
@@ -88,10 +88,10 @@ python3 ha-cleanup.py
 
 ```
 ======================================================================
-  Home Assistant Cleanup Tool  v1.8.1
+  Home Assistant Cleanup Tool  v1.8.2
 ======================================================================
   Config: /homeassistant
-  Database: 5938.4 MB
+  Database: 5229.8 MB
 ----------------------------------------------------------------------
   ⚠️  This tool modifies HA registries and database.
      Always back up first.
@@ -134,34 +134,35 @@ python3 ha-cleanup.py
 Select `d` from the menu to preview all changes:
 
 ```
-[2026-08-22 12:42:09] ==================================================
-[2026-08-22 12:42:09] Home Assistant Cleanup (DRY RUN)
-[2026-08-22 12:42:09] ==================================================
-[2026-08-22 12:42:09] Config path: /homeassistant
-[2026-08-22 12:42:09] Database size: 5938.4 MB
-[2026-08-22 12:42:09] ✓ No orphaned entities found
-[2026-08-22 12:42:09] ✓ No deleted registry items to clean
-[2026-08-22 12:42:09] Using purge_keep_days: 14 (from default)
-[2026-08-22 12:42:09]   [Count] Starting...
-[2026-08-22 12:42:09]   [Count] Done in 0.3s — 8,399,813 states, 101,774 events
-[2026-08-22 12:42:09] Would purge 8,399,813 states, 101,774 events older than 14 days
-[2026-08-22 12:42:09] Would VACUUM (DB: 5938.4 MB, free: 8613.2 MB, est. 59s)
-[2026-08-22 12:42:09] Found 12 entities with numeric suffix:
-[2026-08-22 12:42:09]   - device_tracker.cronus_clients_pixel_6 -> device_tracker.cronus_clients_pixel (mikrotik_ce)
-[2026-08-22 12:42:09]   - sensor.met_office_pm2_5 -> sensor.met_office_pm2 (atmos_ce)
-[2026-08-22 12:42:09]   - button.cronus_wake_pixel_6 -> button.cronus_wake_pixel (mikrotik_ce)
+[2026-09-04 05:57:23] ==================================================
+[2026-09-04 05:57:23] Home Assistant Cleanup (DRY RUN)
+[2026-09-04 05:57:23] ==================================================
+[2026-09-04 05:57:23] Config path: /homeassistant
+[2026-09-04 05:57:23] Database size: 5229.8 MB
+[2026-09-04 05:57:23] ✓ No orphaned entities found
+[2026-09-04 05:57:23] Would clean 143 deleted entities
+[2026-09-04 05:57:23] Would clean 1 deleted devices
+[2026-09-04 05:57:23] Using purge_keep_days: 14 (from default)
+[2026-09-04 05:57:23]   [Count] Starting...
+[2026-09-04 05:57:24]   [Count] Done in 0.5s — 6,721,762 states, 60,169 events
+[2026-09-04 05:57:24] Would purge 6,721,762 states, 60,169 events older than 14 days
+[2026-09-04 05:57:24] Would VACUUM (DB: 5229.8 MB, free: 9147.7 MB, est. 52s)
+[2026-09-04 05:57:24] Found 12 entities with numeric suffix:
+[2026-09-04 05:57:24]   - device_tracker.cronus_clients_pixel_6 -> device_tracker.cronus_clients_pixel (mikrotik_ce)
+[2026-09-04 05:57:24]   - sensor.met_office_pm2_5 -> sensor.met_office_pm2 (atmos_ce)
+[2026-09-04 05:57:24]   - button.cronus_wake_pixel_6 -> button.cronus_wake_pixel (mikrotik_ce)
 ...
-[2026-08-22 12:42:09] 
+[2026-09-04 05:57:24] 
 ==================================================
-[2026-08-22 12:42:09] Summary:
-[2026-08-22 12:42:09]   Orphaned entities: 0
-[2026-08-22 12:42:09]   Deleted registry items: 0
-[2026-08-22 12:42:09]   DB states to purge: 8,399,813
-[2026-08-22 12:42:09]   DB events to purge: 101,774
-[2026-08-22 12:42:09]   Suffix fixes: 12
-[2026-08-22 12:42:09]   Old backup files: 0
-[2026-08-22 12:42:09]   Orphaned statistics: 0
-[2026-08-22 12:42:09] ==================================================
+[2026-09-04 05:57:24] Summary:
+[2026-09-04 05:57:24]   Orphaned entities: 0
+[2026-09-04 05:57:24]   Deleted registry items: 144
+[2026-09-04 05:57:24]   DB states to purge: 6,721,762
+[2026-09-04 05:57:24]   DB events to purge: 60,169
+[2026-09-04 05:57:24]   Suffix fixes: 12
+[2026-09-04 05:57:24]   Old backup files: 0
+[2026-09-04 05:57:24]   Orphaned statistics: 0
+[2026-09-04 05:57:24] ==================================================
 ```
 
 ### Scheduled / Non-Interactive Runs
@@ -174,13 +175,13 @@ python3 ha-cleanup.py --run=3 --yes
 ```
 
 ```
-[2026-08-22 12:38:01] Stopping Home Assistant...
-[2026-08-22 12:38:10] ✓ Cleaned 49 deleted entities
-[2026-08-22 12:38:10] ✓ Cleaned 4 deleted devices
-[2026-08-22 12:38:10] ✓ Removed 2 old backup files (older than 7 days)
-[2026-08-22 12:38:10] Database: 5932.1 MB → 5927.2 MB (4.9 MB saved)
-[2026-08-22 12:38:10] Starting Home Assistant...
-[2026-08-22 12:38:21] Done!
+[2026-09-04 05:58:03] Stopping Home Assistant...
+[2026-09-04 05:58:12] ✓ Cleaned 143 deleted entities
+[2026-09-04 05:58:12] ✓ Cleaned 1 deleted devices
+[2026-09-04 05:58:12] ✓ No old backup files to remove (found 2 backups, all within 7 days)
+[2026-09-04 05:58:12] Database: 5226.9 MB → 5224.4 MB (2.5 MB saved)
+[2026-09-04 05:58:12] Starting Home Assistant...
+[2026-09-04 05:58:22] Done!
 ```
 
 This is the flag combination for a cron job or systemd timer — nothing
@@ -259,6 +260,41 @@ automation:
 it, `shell_command:` is fire-and-forget and a failed run just quietly doesn't
 happen. `returncode` is `0` for success, `1` if the option itself failed, `2`
 if `--run` was pointed at an option that needs interactive selection.
+
+### Running From a Separate Host (Unraid, Proxmox, etc.)
+
+If Home Assistant itself runs inside a VM or container managed by something
+else, the scheduler usually lives on that host rather than alongside HA, and
+has to reach in over SSH. Two things trip this up:
+
+**The remote command needs its own login shell.** A bare
+`ssh user@host "python3 /config/ha-cleanup.py --run=3 --yes"` can fail to
+find `python3`, even though the identical command works fine once you're
+logged in interactively. Wrap it in `bash -lc`, with the inner command
+single-quoted:
+
+```bash
+ssh -p 22 hassio@192.168.0.12 "bash -lc 'python3 /config/ha-cleanup.py --run=3 --yes'"
+```
+
+**A scheduler that runs each line of a script as its own step can lose
+shell variables between lines.** Unraid's User Scripts plugin does this: set
+a variable on one line and it's gone by the time the `ssh` line runs.
+Wrapping the whole script in `( ... )` keeps it running as one block:
+
+```bash
+#!/bin/bash
+(
+  HA_HOST="192.168.0.12"
+  HA_PORT="22"
+  ssh -p "$HA_PORT" -o StrictHostKeyChecking=no "hassio@${HA_HOST}" \
+    "bash -lc 'python3 /config/ha-cleanup.py --run=3 --yes'"
+)
+```
+
+To update `ha-cleanup.py` itself before running it, use a separate `ssh`
+call for the download and another for `chmod`. Chaining `wget` and `chmod`
+onto one line didn't work reliably.
 
 ### Numeric Suffix Fix (Interactive)
 
@@ -962,9 +998,9 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ---
 
-**Version**: 1.8.1  
-**Last Updated**: 2026-09-03  
-**Tested On**: Home Assistant 2026.8.2, `--run=2/3/4 --yes` (and interactively) on a live 5.9 GB database — 49 deleted entities + 4 deleted devices cleaned, 8.4M states + 3M orphan rows purged and VACUUMed (5938.5 → 2839.9 MB), registry and DB integrity verified before/after, HA restarted clean each time. Option 5 tested separately on 2026.8.3, same box: found and removed 4 orphaned statistics (44 long-term rows, left over from a retired device) after confirming all four were genuinely absent from the entity registry, then a follow-up dry run found nothing left, and HA restarted clean. The 1.8.1 fix confirmed on that same box's real Python 3.14.7 on 2026-09-03: `sys.stdin.isatty()` reports `False` under a `shell_command:`-style non-interactive invocation, which is what the fix relies on to tell that case apart from a real terminal.
+**Version**: 1.8.2  
+**Last Updated**: 2026-09-04  
+**Tested On**: Home Assistant 2026.8.2, `--run=2/3/4 --yes` (and interactively) on a live 5.9 GB database — 49 deleted entities + 4 deleted devices cleaned, 8.4M states + 3M orphan rows purged and VACUUMed (5938.5 → 2839.9 MB), registry and DB integrity verified before/after, HA restarted clean each time. Option 5 tested separately on 2026.8.3, same box: found and removed 4 orphaned statistics (44 long-term rows, left over from a retired device) after confirming all four were genuinely absent from the entity registry, then a follow-up dry run found nothing left, and HA restarted clean. The 1.8.1 fix confirmed on that same box's real Python 3.14.7 on 2026-09-03: `sys.stdin.isatty()` reports `False` under a `shell_command:`-style non-interactive invocation, which is what the fix relies on to tell that case apart from a real terminal. The 1.8.2 fix confirmed with a live `--run=3 --yes` on that same box on 2026-09-04, now running Home Assistant 2026.9.0: cleaned 143 deleted entities and 1 deleted device, HA stopped and restarted clean in about 10 seconds either way. That's well under both the old 60-second and new 180-second start timeout, so it confirms no regression on a normal-speed box, not the slow-boot case from Discussion #3 that the timeout split was actually for.
 
 ---
 

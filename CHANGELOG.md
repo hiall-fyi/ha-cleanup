@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.8.2] — 2026-09-04
+
+### Bug Fixes
+
+- **Fixed "Failed to start HA" appearing after a successful cleanup on slower-booting setups.** Starting Home Assistant back up shared the same 60-second timeout as stopping it, but `ha core start` can legitimately take longer than that while add-ons are still finishing their own startup, so the tool reported a failure even though HA had actually come back up fine underneath. Starting now gets its own 180-second timeout. Reported by @comet424 in [Discussion #3](https://github.com/hiall-fyi/ha-cleanup/discussions/3), running option 3 unattended from an Unraid VM.
+
+### Documentation
+
+- **Added a README section for triggering ha-cleanup from a separate host over SSH (Unraid, Proxmox, etc.).** Covers wrapping the remote command in `bash -lc` so it picks up a proper login shell, and wrapping a scheduler script in `( ... )` for schedulers that run each line as its own step and lose shell variables between them, as Unraid's User Scripts plugin does. Worked out by @comet424 in [Discussion #3](https://github.com/hiall-fyi/ha-cleanup/discussions/3).
+
+---
+
 ## [1.8.1] — 2026-09-03
 
 ### Bug Fixes
