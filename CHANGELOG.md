@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.8.3] — 2026-10-29
+
+### Bug Fixes
+
+- **Fixed a refused Home Assistant stop or start crashing the tool.** If the system refused the command that stops or starts Home Assistant (a permission error, for example), the tool crashed with that error, and on the restart side it replaced whatever had gone wrong during the cleanup. A refused command is now treated like any other failed stop or start: the tool tries the next method, or tells you to stop or start Home Assistant yourself, and the log names the command that was refused.
+- **Fixed registry files being saved with default permissions for a moment.** The new copy of a registry file was written with default permissions and only given the original ones after it replaced the old file. It now gets the original permissions before any data is written, so its contents are never readable by more people than the file it replaces.
+- **Fixed a false "Failed to save" on filesystems that reject permission changes.** The save had already gone through by the time the tool tried to put the old permissions back, but it reported a failure anyway. It now carries on when the filesystem refuses the permission step.
+- **Fixed leftovers from a run that was killed part-way.** A crash or power cut during a save could leave a `.tmp.<number>` file in `.storage`, and a purge killed during the orphan cleanup could leave its temporary database index behind for good. Temporary files older than an hour are removed on the next save, and the leftover index is dropped on the next purge.
+
+### Improvements
+
+- **Log lines use brackets and commas instead of dashes.** A finished phase now reads `Done in 0.3s (6,721,762 states, 60,169 events)`, and a few messages use a comma or a full stop. It is only punctuation, but if a script of yours matches these lines, update the pattern.
+
+### Documentation
+
+- **Corrected two statements in the README.** The recorder database is not backed up (only the registry files are, so take your own backup before a purge), and the full cleanup (option 1) doesn't include the orphaned statistics cleanup (option 5).
+- **Split the README in two.** The step-by-step guide to each option, the restore menu, scheduled runs and running from a separate host moved to [FEATURES_GUIDE.md](FEATURES_GUIDE.md). The README keeps the overview, quick start and troubleshooting, and the `#quick-start` and `#scheduled--non-interactive-runs` links still work.
+- **Added a security policy.** [SECURITY.md](SECURITY.md) explains how to report a vulnerability privately through GitHub. The repository also now runs CodeQL and a daily secret scan.
+
+---
+
 ## [1.8.2] — 2026-09-04
 
 ### Bug Fixes
