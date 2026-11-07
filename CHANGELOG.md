@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.8.4] — 2026-11-07
+
+### Bug Fixes
+
+- **Fixed entities on a child device being treated as orphans.** Home Assistant now keeps some devices as child devices, for example each channel of a multi-channel Tuya switch or a non-root endpoint of a Z-Wave device, and stores them separately from ordinary devices. The orphan check only looked at ordinary devices, so an entity on a child device looked like it pointed at a device that no longer exists. The dry run listed it, and the real run (option 2, and option 1 which includes it) removed it from the entity registry. Child devices now count as existing devices, and so do the old ids of devices Home Assistant has since split, which a registry file written by an older Home Assistant can still reference. Entities whose device really is gone are still reported. Found by comparing the tool against Home Assistant 2026.11.0 and reproduced with a test registry; it hasn't been seen on a real box with child devices, and mine has none. If you ran option 1 or 2 on a setup with child devices, the entity registry backup taken before each removal is in `.storage`, and option 8 restores from it.
+
+### Documentation
+
+- **Refreshed the Option 1 example in the Features Guide** with output from a real full cleanup on Home Assistant 2026.11.0.
+- **Corrected the "update before running" example for Unraid and similar hosts.** Chaining `wget` and `chmod` didn't fail because of the chaining. The earlier attempt passed them as two quoted arguments to one `ssh` call, which `ssh` joins into a single command. The example now says so, and keeps `sudo` on both commands, which is what worked on an Unraid VM.
+
+---
+
 ## [1.8.3] — 2026-10-29
 
 ### Bug Fixes

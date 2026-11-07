@@ -139,14 +139,18 @@ Wrapping the whole script in `( ... )` keeps it running as one block:
 ```
 
 To update `ha-cleanup.py` itself before running it, use a separate `ssh`
-call for the download and another for `chmod`. Chaining `wget` and `chmod`
-onto one line didn't work reliably:
+call for the download and another for `chmod`. Don't pass the two commands
+as two quoted arguments to a single `ssh` call: `ssh` joins its arguments
+into one command line, so the second command ends up as extra arguments to
+the first. The `sudo` is there because the `hassio` login on an Unraid VM
+needed it to write to `/config`; drop it if your login can write there
+already:
 
 ```bash
 ssh -p "$HA_PORT" -o StrictHostKeyChecking=no "hassio@${HA_HOST}" \
-  "wget -O /config/ha-cleanup.py https://raw.githubusercontent.com/hiall-fyi/ha-cleanup/main/ha-cleanup.py"
+  "sudo wget -O /config/ha-cleanup.py https://raw.githubusercontent.com/hiall-fyi/ha-cleanup/main/ha-cleanup.py"
 ssh -p "$HA_PORT" -o StrictHostKeyChecking=no "hassio@${HA_HOST}" \
-  "chmod +x /config/ha-cleanup.py"
+  "sudo chmod +x /config/ha-cleanup.py"
 ```
 
 ### Numeric Suffix Fix (Interactive)
@@ -340,30 +344,28 @@ It then cleans old backup files (7+ days) before starting Home Assistant again.
 **Example output:**
 
 ```
-⚠️  This will stop Home Assistant. Continue? [y/N]: y
-[2026-08-01 14:30:13] Stopping Home Assistant...
-[2026-08-01 14:30:22] ✓ No orphaned entities found
-[2026-08-01 14:30:22] ✓ Cleaned 89 deleted entities
-[2026-08-01 14:30:22] ✓ Cleaned 1 deleted devices
-[2026-08-01 14:30:22] Using purge_keep_days: 14 (from default)
-[2026-08-01 14:30:22]   [Count] Starting...
-[2026-08-01 14:30:23]   [Count] Done in 0.3s (8,085,627 states, 77,573 events)
-[2026-08-01 14:30:23] Purging 8,085,627 states, 77,573 events older than 14 days
-[2026-08-01 14:30:23]   [States] Starting...
-[2026-08-01 14:31:09]     Unlinked 8,029,055 old_state_id references
-[2026-08-01 14:31:10]     Batch 1/81: deleted 100,000/8,085,627 (1%)
+[2026-11-07 09:49:03] Stopping Home Assistant...
+[2026-11-07 09:49:12] ✓ No orphaned entities found
+[2026-11-07 09:49:13] ✓ Cleaned 7 deleted entities
+[2026-11-07 09:49:13] ✓ Cleaned 3 deleted devices
+[2026-11-07 09:49:13] Using purge_keep_days: 14 (from default)
+[2026-11-07 09:49:13]   [Count] Starting...
+[2026-11-07 09:49:13]   [Count] Done in 0.2s (4,536,456 states, 33,905 events)
+[2026-11-07 09:49:13] Purging 4,536,456 states, 33,905 events older than 14 days
+[2026-11-07 09:49:13]   [States] Starting...
+[2026-11-07 09:49:30]     Unlinked 4,521,720 old_state_id references
 ...
-[2026-08-01 14:33:51]   [States] Done in 208.6s (deleted 8,085,627 rows)
-[2026-08-01 14:33:52]   [Events] Done in 0.9s (deleted 77,573 rows)
-[2026-08-01 14:46:19]   [Orphan Attributes] Done in 746.9s (deleted 3,205,456 rows)
-[2026-08-01 14:46:19]   [Orphan Event Data] Done in 0.0s (deleted 568 rows)
-[2026-08-01 14:46:19]   [VACUUM] Starting...
-[2026-08-01 14:47:09]   [VACUUM] Done in 49.3s (DB: 5920.3 → 2748.5 MB, 3171.8 MB saved)
-[2026-08-01 14:47:09] ✓ Database purged
-[2026-08-01 14:47:09] ✓ Removed 6 old backup files (older than 7 days)
-[2026-08-01 14:47:09] Database: 5924.4 MB → 2748.5 MB (3175.9 MB saved)
-[2026-08-01 14:47:09] Starting Home Assistant...
-[2026-08-01 14:47:24] Done!
+[2026-11-07 09:50:35]   [States] Done in 82.2s (deleted 4,536,456 rows)
+[2026-11-07 09:50:35]   [Events] Done in 0.3s (deleted 33,905 rows)
+[2026-11-07 09:56:39]   [Orphan Attributes] Done in 363.2s (deleted 1,588,427 rows)
+[2026-11-07 09:56:39]   [Orphan Event Data] Done in 0.1s (deleted 309 rows)
+[2026-11-07 09:56:39]   [VACUUM] Starting...
+[2026-11-07 09:57:53]   [VACUUM] Done in 74.5s (DB: 4541.5 → 2926.7 MB, 1614.8 MB saved)
+[2026-11-07 09:57:53] ✓ Database purged
+[2026-11-07 09:57:53] ✓ Removed 2 old backup files (older than 7 days)
+[2026-11-07 09:57:53] Database: 4544.4 MB → 2926.7 MB (1617.7 MB saved)
+[2026-11-07 09:57:53] Starting Home Assistant...
+[2026-11-07 09:58:24] Done!
 
 ⚠️  Suffix fix requires manual selection. Run option 7 separately.
 ```
@@ -744,4 +746,4 @@ The script automatically detects your Home Assistant config directory:
 
 ## Verification record
 
-**Tested On**: Home Assistant 2026.8.2, `--run=2/3/4 --yes` (and interactively) on a live 5.9 GB database — 49 deleted entities + 4 deleted devices cleaned, 8.4M states + 3M orphan rows purged and VACUUMed (5938.5 → 2839.9 MB), registry and DB integrity verified before/after, HA restarted clean each time. Option 5 tested separately on 2026.8.3, same box: found and removed 4 orphaned statistics (44 long-term rows, left over from a retired device) after confirming all four were genuinely absent from the entity registry, then a follow-up dry run found nothing left, and HA restarted clean. The 1.8.1 fix confirmed on that same box's real Python 3.14.7 on 2026-09-03: `sys.stdin.isatty()` reports `False` under a `shell_command:`-style non-interactive invocation, which is what the fix relies on to tell that case apart from a real terminal. The 1.8.2 fix confirmed with a live `--run=3 --yes` on that same box on 2026-09-04, now running Home Assistant 2026.9.0: cleaned 143 deleted entities and 1 deleted device, HA stopped and restarted clean in about 10 seconds either way. That's well under both the old 60-second and new 180-second start timeout, so it confirms no regression on a normal-speed box, not the slow-boot case from Discussion #3 that the timeout split was actually for.
+**Tested On**: Home Assistant 2026.8.2, `--run=2/3/4 --yes` (and interactively) on a live 5.9 GB database — 49 deleted entities + 4 deleted devices cleaned, 8.4M states + 3M orphan rows purged and VACUUMed (5938.5 → 2839.9 MB), registry and DB integrity verified before/after, HA restarted clean each time. Option 5 tested separately on 2026.8.3, same box: found and removed 4 orphaned statistics (44 long-term rows, left over from a retired device) after confirming all four were genuinely absent from the entity registry, then a follow-up dry run found nothing left, and HA restarted clean. The 1.8.1 fix confirmed on that same box's real Python 3.14.7 on 2026-09-03: `sys.stdin.isatty()` reports `False` under a `shell_command:`-style non-interactive invocation, which is what the fix relies on to tell that case apart from a real terminal. The 1.8.2 fix confirmed with a live `--run=3 --yes` on that same box on 2026-09-04, now running Home Assistant 2026.9.0: cleaned 143 deleted entities and 1 deleted device, HA stopped and restarted clean in about 10 seconds either way. That's well under both the old 60-second and new 180-second start timeout, so it confirms no regression on a normal-speed box, not the slow-boot case from Discussion #3 that the timeout split was actually for. A full cleanup (`--run=1 --yes`) of 1.8.3 on 2026-11-07, now running Home Assistant 2026.11.0, cleaned 7 deleted entities and 3 deleted devices, purged 4,536,456 states and 33,905 events plus 1,588,427 orphan attribute rows (DB 4544.4 → 2926.7 MB), and HA restarted clean. That box has no child devices, so the 1.8.4 child device fix is covered by automated tests only.

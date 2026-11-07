@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
-VERSION = "1.8.3"
+VERSION = "1.8.4"
 
 # Configure logging
 logging.basicConfig(
@@ -569,9 +569,17 @@ def find_orphaned_entities() -> list[tuple[str, str, str]]:
         logger.warning("⚠️  Error loading registry files: %s", e)
         return []
 
+    # Entities can sit on a child device or on a pre-split composite id; neither is in "devices".
     devices = {
-        d["id"] for d in _records(device_data, "devices")
+        d["id"]
+        for key in ("devices", "child_devices")
+        for d in _records(device_data, key)
     }
+    devices.update(
+        d["composite_device_id"]
+        for d in _records(device_data, "devices")
+        if d.get("composite_device_id")
+    )
     config_entries = {
         e["entry_id"] for e in _records(config_data, "entries")
     }

@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.6+-blue?style=for-the-badge&logo=home-assistant) ![Python](https://img.shields.io/badge/Python-3.13+-3776AB?style=for-the-badge&logo=python&logoColor=white) ![Stable](https://img.shields.io/badge/Stable-1.8.3-brightgreen?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-lightgrey?style=for-the-badge)
+![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.6+-blue?style=for-the-badge&logo=home-assistant) ![Python](https://img.shields.io/badge/Python-3.13+-3776AB?style=for-the-badge&logo=python&logoColor=white) ![Stable](https://img.shields.io/badge/Stable-1.8.4-brightgreen?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-lightgrey?style=for-the-badge)
 
 ![GitHub stars](https://img.shields.io/github/stars/hiall-fyi/ha-cleanup?style=for-the-badge&logo=github) [![Buy Me A Coffee](https://img.shields.io/badge/Support-Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/hiallfyi)
 
@@ -80,7 +80,7 @@ python3 ha-cleanup.py
 
 ```
 ======================================================================
-  Home Assistant Cleanup Tool  v1.8.3
+  Home Assistant Cleanup Tool  v1.8.4
 ======================================================================
   Config: /homeassistant
   Database: 5229.8 MB
@@ -296,8 +296,8 @@ Code contributions are welcome too: fork, branch, commit, and open a pull reques
 
 ---
 
-**Version**: 1.8.3  
-**Last Updated**: 2026-10-29  
+**Version**: 1.8.4  
+**Last Updated**: 2026-11-07  
 **Tested On**: see the [verification record](FEATURES_GUIDE.md#verification-record)
 
 ---
